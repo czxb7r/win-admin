@@ -19,6 +19,10 @@
           - PCIe Link State Power Management (ASPM)                     -> OFF
           - USB selective suspend (power plan, AC + DC)                 -> OFF
           - Fast Startup (HiberbootEnabled)                             -> OFF
+          - System sleep and hibernate on AC power                      -> NEVER
+            (a sleeping machine is unreachable: Modern Standby keeps the
+            link up but sshd stops answering. Battery (DC) timeouts are left
+            alone, so a laptop still sleeps when unplugged.)
       * VENDOR-SPECIFIC (silently skipped where the property doesn't exist):
           - Energy-Efficient Ethernet (*EEE), Green Ethernet, Gigabit Lite,
             Power Saving Mode, Advanced EEE, Auto Disable Gigabit       -> OFF
@@ -143,6 +147,15 @@ function Show-State($label) {
     Write-Host ("  Fast Startup (HiberbootEnabled) : {0}" -f $hb)
     $usb = powercfg /query SCHEME_CURRENT $usbSub $usbSet | Select-String 'Current (AC|DC) Power Setting Index' | ForEach-Object { ("$_" -replace '.*Current (AC|DC).*0x0*([0-9a-f]+)$', '$1=$2') }
     Write-Host ("  USB selective suspend (1=on)    : {0}" -f ($usb -join ' '))
+    $sl = Get-AcSeconds 'SUB_SLEEP' 'STANDBYIDLE'
+    $hi = Get-AcSeconds 'SUB_SLEEP' 'HIBERNATEIDLE'
+    Write-Host ("  Sleep / hibernate on AC (s, 0=never) : {0} / {1}" -f $sl, $hi)
+}
+
+function Get-AcSeconds($sub, $set) {
+    $line = powercfg /query SCHEME_CURRENT $sub $set | Select-String 'Current AC Power Setting Index' | Select-Object -First 1
+    if ($line -and ("$line" -match '0x([0-9a-f]+)\s*$')) { return [Convert]::ToInt64($Matches[1], 16) }
+    return 'n/a'
 }
 
 # USB settings subgroup / USB selective suspend setting (no powercfg aliases)
@@ -239,6 +252,13 @@ Write-Host "  USB selective suspend -> Off" -ForegroundColor Green
 powercfg /setacvalueindex SCHEME_CURRENT $usbSub $usbSet 0 | Out-Null
 powercfg /setdcvalueindex SCHEME_CURRENT $usbSub $usbSet 0 | Out-Null
 powercfg /setactive SCHEME_CURRENT | Out-Null
+
+# ---- System sleep / hibernate on AC -> never ------------------------------
+# Standard for every client machine: on mains power it stays reachable for
+# remote admin and backups. DC (battery) timeouts are not touched.
+Write-Host "  Sleep and hibernate on AC -> never" -ForegroundColor Green
+powercfg /change standby-timeout-ac 0 | Out-Null
+powercfg /change hibernate-timeout-ac 0 | Out-Null
 
 # ---- Fast Startup -> Off --------------------------------------------------
 Write-Host "  Fast Startup (HiberbootEnabled) -> Off" -ForegroundColor Green
