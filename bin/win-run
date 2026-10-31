@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# win-run -- upload a win-admin PowerShell script to a Windows host over SSH and run it.
+set -euo pipefail
+
+WIN_ADMIN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+REMOTE_DIR='C:\tmp\win-admin'
+REMOTE_DIR_FWD='C:/tmp/win-admin'
+TASK_TIMEOUT=900
+
+usage() {
+    cat <<'EOF'
+Usage: win-run [options] <host> <script> [script args...]
+
+Uploads <script> (a path, or a name under win-admin/scripts/, ".ps1" optional)
+to C:\tmp\win-admin on <host>, runs it with Windows PowerShell, prints its
+output, removes the uploaded files and exits with the script's exit code.
+Script args are passed through verbatim as PowerShell arguments.
+
+Options:
+  -c, --config FILE  Upload FILE (JSON) too and pass it as -Config.
+  -f, --file         Launch with powershell.exe -File instead of
+                     -EncodedCommand, for hosts whose AV kills encoded
+                     PowerShell (seen with Norton 360: empty output, exit 0).
+                     Setup and cleanup run as plain commands too.
+                     Errors go to stderr rather than being merged into stdout.
+  -t, --as-task      Run as a one-off SYSTEM scheduled task and poll for it,
+                     for scripts that bounce the NIC the SSH session uses.
+      --timeout SEC  --as-task wait limit (default 900).
+  -k, --keep         Leave the uploaded script/config on the host.
+  -h, --help         This help.
+
+Requires: key-based SSH to <host> with PowerShell as the default shell
+(see scripts/enable-ssh-admin.ps1).
+
+Examples:
+  win-run pc01 netdrop-diag -DnsTestName example.com
+  win-run -c windows/client.json pc01 enable-ssh-admin
+  win-run --file pc01 get-inventory > pc01.json
+  win-run --as-task pc01 disable-network-power-saving
+EOF
+}
+
+die() { echo "win-run: $*" >&2; exit 2; }
+
+# Run PowerShell text on the host via -EncodedCommand (avoids Windows quote stripping).
+# All streams are merged to plain stdout text: without a TTY, powershell.exe otherwise
+# emits Write-Host/error output to stderr as CLIXML. Bodies report status by setting
+# $global:__rc (not `exit`); the trailing `exit $LASTEXITCODE` runs in sshd's own
+# PowerShell DefaultShell, which would otherwise collapse every failure to 1.
+remote_ps() {
+    local host="$1" body="$2" b64 wrapped
+    wrapped="\$ProgressPreference='SilentlyContinue'; \$global:__rc = 0
+& {
+$body
+} *>&1 | Out-String -Stream
+exit \$global:__rc"
+    b64=$(printf '%s' "$wrapped" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\n')
+    ssh -o ConnectTimeout=10 "$host" "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $b64; exit \$LASTEXITCODE"
+}
+
+# --file mode: plain command line, parsed by sshd's PowerShell DefaultShell. Keep bodies
+# to simple single-quoted calls (double quotes get stripped on the way through).
+remote_plain() {
+    ssh -o ConnectTimeout=10 "$1" "\$ProgressPreference='SilentlyContinue'; $2; exit \$LASTEXITCODE"
+}
+
+psq() { printf "'%s'" "${1//\'/\'\'}"; }
+
+config="" as_task=0 keep=0 file_mode=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config) config="${2:?}"; shift 2 ;;
+        -f|--file) file_mode=1; shift ;;
+        -t|--as-task) as_task=1; shift ;;
+        --timeout) TASK_TIMEOUT="${2:?}"; shift 2 ;;
+        -k|--keep) keep=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) die "unknown option: $1" ;;
+        *) break ;;
+    esac
+done
+[[ $# -ge 2 ]] || { usage >&2; exit 2; }
+[[ $file_mode -eq 0 || $as_task -eq 0 ]] || die "--file and --as-task are mutually exclusive (--as-task already uses -File)"
+host="$1" script="$2"; shift 2
+
+if [[ ! -f "$script" ]]; then
+    name="${script%.ps1}.ps1"
+    script="$WIN_ADMIN/scripts/$name"
+    [[ -f "$script" ]] || die "no such script: $name (looked in $WIN_ADMIN/scripts)"
+fi
+[[ -z "$config" || -f "$config" ]] || die "no such config file: $config"
+
+"$WIN_ADMIN/tools/check-ascii" "$script" ${config:+"$config"} >&2 || die "non-ASCII bytes: Windows PowerShell 5.1 would misparse the file"
+
+base="$(basename "$script")"
+remote_script="$REMOTE_DIR\\$base"
+script_args="$*"
+if grep -q '\[switch\]\$NoPause' "$script"; then script_args="$script_args -NoPause"; fi
+if [[ -n "$config" ]]; then
+    remote_config="$REMOTE_DIR\\$(basename "$config")"
+    # cmd.exe/-File (task mode) only understands double quotes; & (direct mode) takes PowerShell quoting.
+    if [[ $as_task -eq 1 ]]; then script_args="-Config \"$remote_config\" $script_args"
+    else script_args="-Config $(psq "$remote_config") $script_args"; fi
+fi
+
+if [[ $file_mode -eq 1 ]]; then run_small=remote_plain; else run_small=remote_ps; fi
+$run_small "$host" "New-Item -ItemType Directory -Force -Path $(psq "$REMOTE_DIR") | Out-Null"
+scp -q "$script" "$host:$REMOTE_DIR_FWD/$base"
+[[ -z "$config" ]] || scp -q "$config" "$host:$REMOTE_DIR_FWD/$(basename "$config")"
+
+cleanup() {
+    [[ $keep -eq 1 ]] && return 0
+    local rm="Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $(psq "$remote_script")"
+    [[ -z "$config" ]] || rm="$rm, $(psq "$remote_config")"
+    $run_small "$host" "$rm" || echo "win-run: cleanup failed; files left in $REMOTE_DIR" >&2
+}
+
+if [[ $as_task -eq 0 ]]; then
+    set +e
+    if [[ $file_mode -eq 1 ]]; then
+        # The command line is parsed by sshd's PowerShell DefaultShell, so PowerShell quoting applies.
+        ssh -o ConnectTimeout=10 "$host" "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $(psq "$remote_script") $script_args; exit \$LASTEXITCODE"
+    else
+        remote_ps "$host" "& $(psq "$remote_script") $script_args; \$global:__rc = \$LASTEXITCODE"
+    fi
+    rc=$?
+    set -e
+    cleanup
+    exit $rc
+fi
+
+# ---- --as-task: one-off SYSTEM scheduled task, polled from here -------------
+task="win-admin-${base%.ps1}-$(date +%Y%m%d%H%M%S)"
+out="$REMOTE_DIR\\$task.out"
+cmdline="/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$remote_script\" $script_args > \"$out\" 2>&1"
+remote_ps "$host" "
+\$a = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument $(psq "$cmdline")
+\$p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName $(psq "$task") -Action \$a -Principal \$p -Force | Out-Null
+Start-ScheduledTask -TaskName $(psq "$task")
+"
+echo "win-run: started scheduled task $task on $host; polling (the SSH path may drop meanwhile)" >&2
+
+deadline=$(( $(date +%s) + TASK_TIMEOUT ))
+state=""
+while :; do
+    sleep 5
+    state=$(remote_ps "$host" "(Get-ScheduledTask -TaskName $(psq "$task")).State" 2>/dev/null | tr -d '\r' || true)
+    [[ "$state" == "Ready" ]] && break
+    if (( $(date +%s) > deadline )); then
+        echo "win-run: task $task still '${state:-unreachable}' after ${TASK_TIMEOUT}s; left registered on $host" >&2
+        exit 3
+    fi
+done
+
+set +e
+remote_ps "$host" "
+Get-Content -LiteralPath $(psq "$out") -ErrorAction SilentlyContinue
+\$rc = (Get-ScheduledTaskInfo -TaskName $(psq "$task")).LastTaskResult
+Unregister-ScheduledTask -TaskName $(psq "$task") -Confirm:\$false
+Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $(psq "$out")
+\$global:__rc = \$rc
+"
+rc=$?
+set -e
+cleanup
+exit $rc

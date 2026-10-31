@@ -1,0 +1,17 @@
+{
+  "AdminUser": "bgadmin",
+  "AllowFrom": [
+    "192.0.2.10"
+  ],
+  "PublicKeys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEbE6VWMTSMGUD/X8DTWRJCYhXrJBt9arUVrEn0Noozw"
+  ],
+  "LogDir": "C:\\tmp",
+  "DnsTestName": "example.com",
+  "DaysBack": 4,
+  "SupportContact": "your IT support contact",
+  "SkipUpdateSearch": false,
+  "AppsOfNote": [
+    "Example Line-of-Business App"
+  ]
+}

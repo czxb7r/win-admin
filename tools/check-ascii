@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fail on any non-ASCII byte: Windows PowerShell 5.1 reads BOM-less UTF-8 as Windows-1252.
+set -euo pipefail
+[[ $# -gt 0 ]] || { cd "$(dirname "$0")/.."; set -- scripts/*.ps1; }
+for f in "$@"; do [[ -r "$f" ]] || { echo "check-ascii: cannot read $f" >&2; exit 2; }; done
+perl -ne 'if (/[^\x00-\x7F]/) { print "$ARGV:$.: $_"; $bad = 1 } close ARGV if eof; END { exit($bad ? 1 : 0) }' "$@"

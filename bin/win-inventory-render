@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Render get-inventory.ps1 JSON files as a Markdown table, one column per host."""
+import argparse
+import json
+import re
+import sys
+
+BACKUP_AGENTS = r"Veeam|Acronis|Carbonite|Backblaze|IDrive|Datto|Active Backup|Macrium|CrashPlan|Cove|Axcient|Arcserve|Druva|Hyper Backup"
+DEFAULT_NOTE = (r"Microsoft 365|Microsoft Office|Teams|Chrome|Firefox|Adobe Acrobat|Zoom|"
+                r"VNC|TeamViewer|AnyDesk|ScreenConnect|Tailscale|SentinelOne|Bitdefender|Norton|McAfee|Sophos")
+
+
+BIOS_PLACEHOLDERS = re.compile(r"^(default string|to be filled by o\.?e\.?m\.?|system (product name|manufacturer|version)|"
+                               r"not applicable|none|n/a|o\.?e\.?m\.?)$", re.I)
+
+
+def real(s):
+    s = (s or "").strip()
+    return "" if BIOS_PLACEHOLDERS.match(s) else s
+
+
+def esc(s):
+    return str(s).replace("|", "\\|").replace("\n", " ")
+
+
+def yn(v, yes="Yes", no="No", unknown="unknown"):
+    return unknown if v is None else (yes if v else no)
+
+
+def date(s):
+    return (s or "")[:10]
+
+
+def gb(v):
+    if v is None:
+        return "?"
+    return f"{v:g} GB"
+
+
+def row_make(i):
+    h = i.get("hardware") or {}
+    s = f"{real(h.get('manufacturer'))} {real(h.get('model'))}".strip()
+    fam = real(h.get("systemFamily"))
+    if fam and fam not in s:
+        s += f" ({fam})"
+    return s
+
+
+def row_serial(i):
+    h = i.get("hardware") or {}
+    return f"`{h.get('serial')}` (BIOS `{h.get('biosVersion')}`, {date(h.get('biosDate'))})"
+
+
+def row_cpu(i):
+    c = (i.get("hardware") or {}).get("cpu") or {}
+    s = f"{c.get('name')}, {c.get('cores')} cores / {c.get('threads')} threads"
+    if (c.get("sockets") or 1) > 1:
+        s += f", {c['sockets']} sockets"
+    return s
+
+
+def row_ram(i):
+    h = i.get("hardware") or {}
+    mods = h.get("memoryModules") or []
+    s = f"{gb(h.get('memoryInstalledGB'))} installed, {gb(h.get('memoryUsableGB'))} usable"
+    if mods:
+        sizes = " + ".join(gb(m.get("sizeGB")) for m in mods)
+        speed = mods[0].get("speedMHz")
+        s += f" ({sizes}" + (f", {speed} MHz" if speed else "") + ")"
+    return s
+
+
+def row_disk(i):
+    disks = (i.get("hardware") or {}).get("disks") or []
+    parts = [f"{gb(d.get('sizeGB'))} {d.get('model')} ({d.get('busType')} {d.get('mediaType')})" for d in disks]
+    vols = [f"`{v.get('letter')}` {gb(v.get('sizeGB'))}, {gb(v.get('freeGB'))} free"
+            for v in (i.get("volumes") or []) if v.get("sizeGB")]
+    return "; ".join(parts) + ("<br>" + "; ".join(vols) if vols else "")
+
+
+def row_windows(i):
+    o = i.get("os") or {}
+    return (f"{o.get('caption')} **{o.get('displayVersion')}**, build {o.get('build')}; "
+            f"installed {date(o.get('installDate'))}; last boot {date(o.get('lastBoot'))}")
+
+
+def row_join(i):
+    j = i.get("join") or {}
+    h = i.get("host") or {}
+    if j.get("partOfDomain"):
+        s = f"AD domain `{j.get('netbiosDomain') or '?'}` (`{j.get('domain')}`)"
+    else:
+        s = f"Workgroup `{j.get('workgroup')}`"
+    s += "; Entra-joined" + (f" (`{j['entraTenant']}`)" if j.get("entraTenant") else "") if j.get("entraJoined") else "; not Entra-joined"
+    if j.get("workplaceJoined"):
+        s += "; workplace-joined"
+    if h.get("primaryDnsSuffix"):
+        s += f". Primary DNS suffix `{h['primaryDnsSuffix']}`"
+    return s
+
+
+def row_network(i):
+    out = []
+    for n in i.get("network") or []:
+        up = n.get("status") == "Up"
+        s = f"`{n.get('name')}` {n.get('description')}"
+        if up:
+            ips = ", ".join(f"`{a}`" for a in n.get("ipv4") or [])
+            s += f" — {n.get('linkSpeed')}, {ips}" + (" (DHCP)" if n.get("dhcp") else " (static)")
+            if n.get("dnsServers"):
+                s += ", DNS " + ", ".join(f"`{d}`" for d in n["dnsServers"])
+        else:
+            s += f" — {str(n.get('status')).lower()}"
+        s += f", MAC `{n.get('mac')}`"
+        out.append(s)
+    return "<br>".join(out)
+
+
+def row_nic_power(i):
+    out = []
+    for n in i.get("network") or []:
+        if n.get("media") != "802.3":
+            continue
+        na, ms = n.get("allowPowerOffNetAdapter"), n.get("allowPowerOffMsPower")
+        # "Unsupported" (e.g. USB adapters) and an empty object (PowerShell $null) mean no value.
+        unsupported = na == "Unsupported"
+        na = None if na in ("Unsupported", {}) else na
+        ms = None if ms == {} else ms
+        na_on = None if na is None else na != "Disabled"
+        if na_on is not None and ms is not None and na_on != ms:
+            bits = [f"allow-power-off **sources disagree** (NetAdapter {na}, MSPower_DeviceEnable {yn(ms, 'on', 'off')})"]
+        else:
+            unknown = "not supported" if unsupported else "unknown"
+            bits = [f"allow-power-off {yn(na_on if na_on is not None else ms, 'on', 'off', unknown)}"]
+        bits += [f"{k} {v}" for k, v in (n.get("powerSavingProps") or {}).items()]
+        out.append(f"`{n.get('name')}`: " + ", ".join(bits))
+    p = i.get("power") or {}
+    aspm = {0: "off", 1: "moderate", 2: "max savings"}.get(p.get("pcieAspmAc"), p.get("pcieAspmAc"))
+    sleep = p.get("sleepAcSeconds")
+    sleep = "never" if sleep == 0 else (f"{sleep // 60} min" if sleep else "?")
+    usb = p.get("usbSuspendAc")
+    usb = "" if usb is None else f"; USB selective suspend (AC) {yn(usb == 1, 'on', 'off')}"
+    out.append(f"Fast Startup {yn(p.get('fastStartup'), 'on', 'off')}; PCIe ASPM (AC) {aspm}{usb}; sleep (AC) {sleep}")
+    return "<br>".join(out)
+
+
+def row_bitlocker(i):
+    vols = i.get("bitlocker") or []
+    if not vols:
+        return "no data"
+    return "<br>".join(
+        f"`{v.get('mountPoint')}` {v.get('volumeStatus')}, protection {v.get('protectionStatus')}"
+        + (f", {v.get('encryptionPct')}%" if v.get("encryptionPct") not in (None, 0, 100) else "")
+        + (", protectors: " + ", ".join(v["protectors"]) if v.get("protectors") else ", no protectors")
+        for v in vols)
+
+
+def row_updates(i):
+    u = i.get("updates") or {}
+    rp = u.get("rebootPending") or []
+    s = "Reboot pending (" + ", ".join(rp) + ")" if rp else "No reboot pending"
+    # Skip Microsoft Store app updates (titles start with a 12-char Store product ID) and repeats.
+    hist, seen = [], set()
+    for h in u.get("recentHistory") or []:
+        t = h.get("title") or ""
+        if h.get("succeeded") and not re.match(r"^9[A-Z0-9]{11}-", t) and t not in seen:
+            seen.add(t)
+            hist.append(h)
+    if hist:
+        s += "<br>Last installed: " + "; ".join(f"{date(h['date'])} {h['title']}" for h in hist[:3])
+    pend = u.get("pending")
+    if pend is None:
+        s += "<br>Pending: not searched"
+    elif pend:
+        s += f"<br>Pending ({len(pend)}): " + "; ".join(p["title"] for p in pend[:5]) + (" …" if len(pend) > 5 else "")
+    else:
+        s += "<br>Pending: none"
+    pol = u.get("policy") or {}
+    if pol.get("wsusServer"):
+        s += f"<br>Policy: WSUS `{pol['wsusServer']}`"
+    elif pol.get("configured"):
+        s += "<br>Policy: WU policy set" + (f" (AUOptions {pol['auOptions']})" if pol.get("auOptions") else "")
+    else:
+        s += "<br>Policy: none (consumer defaults)"
+    return s
+
+
+def row_av(i):
+    sec = i.get("security") or {}
+    av = [f"{a.get('name')}" + ("" if a.get("enabled") else " (disabled)") + ("" if a.get("upToDate") else " (out of date)")
+          for a in sec.get("antivirus") or []]
+    s = ", ".join(av) or "none reported"
+    d = sec.get("defender")
+    if d:
+        s += (f"<br>Defender: {d.get('runningMode')}, real-time {yn(d.get('realTimeProtection'), 'on', 'off')}, "
+              f"tamper protection {yn(d.get('tamperProtected'), 'on', 'off')}, signatures {date(d.get('signatureUpdated'))}")
+    fw = sec.get("firewall") or []
+    if fw:
+        s += "<br>Firewall: " + ", ".join(f"{f['profile']} {yn(f.get('enabled'), 'on', 'off')}" for f in fw)
+    return s
+
+
+def matching_apps(i, pattern):
+    rx = re.compile(pattern, re.I)
+    return [a for a in i.get("applications") or [] if rx.search(a.get("name") or "")]
+
+
+def row_backup(i):
+    found = matching_apps(i, BACKUP_AGENTS)
+    return ", ".join(f"{a['name']} {a.get('version') or ''}".strip() for a in found) or "None detected"
+
+
+def row_remote(i):
+    r = i.get("remoteAccess") or {}
+
+    def svc(x):
+        return f"{x['status']}/{x['startType']}" if x else "not installed"
+    s = f"sshd {svc(r.get('sshd'))}; WinRM {svc(r.get('winrm'))}; RDP {yn(r.get('rdpEnabled'), 'enabled', 'disabled')}"
+    tools = r.get("remoteTools") or []
+    if tools:
+        s += "<br>" + ", ".join(f"{t['displayName']} ({t['status']})" for t in tools)
+    return s
+
+
+def row_profiles(i):
+    profs = (i.get("accounts") or {}).get("profiles") or []
+    return ", ".join(f"`{p.get('user') or p.get('sid')}`" + (" (roaming)" if p.get("roaming") else "") for p in profs) or "none"
+
+
+def row_users(i):
+    users = (i.get("accounts") or {}).get("localUsers") or []
+    return ", ".join(f"`{u['name']}`" + ("" if u.get("enabled") else " (disabled)") for u in users)
+
+
+def row_admins(i):
+    admins = (i.get("accounts") or {}).get("localAdmins") or []
+    return ", ".join(f"`{a['name']}`" for a in admins)
+
+
+def make_row_apps(note):
+    def row_apps(i):
+        apps = i.get("applications") or []
+        user = sum(1 for a in apps if a.get("scope") == "user")
+        s = f"{len(apps)} installed" + (f" ({user} per-user, loaded profiles only)" if user else "")
+        found = matching_apps(i, note)
+        if found:
+            s += "<br>Of note: " + ", ".join(f"{a['name']} {a.get('version') or ''}".strip() for a in found)
+        return s
+    return row_apps
+
+
+def row_errors(i):
+    errs = i.get("errors") or []
+    return "<br>".join(esc(e) for e in errs) if errs else "none"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("files", nargs="+", help="JSON files from get-inventory.ps1")
+    ap.add_argument("-c", "--config", help="client config JSON; uses its AppsOfNote list (regex fragments)")
+    ap.add_argument("--apps", action="store_true", help="append the full application list per host")
+    args = ap.parse_args()
+
+    note = DEFAULT_NOTE
+    if args.config:
+        with open(args.config, encoding="utf-8-sig") as f:
+            extra = json.load(f).get("AppsOfNote") or []
+        if extra:
+            note = note + "|" + "|".join(extra)
+
+    invs = []
+    for path in args.files:
+        with open(path, encoding="utf-8-sig") as f:
+            inv = json.load(f)
+        if not str(inv.get("schema", "")).startswith("win-admin/inventory/"):
+            sys.exit(f"{path}: not a win-admin inventory file")
+        invs.append(inv)
+
+    rows = [
+        ("Make / model", row_make), ("Serial", row_serial), ("CPU", row_cpu), ("RAM", row_ram),
+        ("Disk", row_disk), ("Windows", row_windows), ("Directory join", row_join),
+        ("Network", row_network), ("NIC / power saving", row_nic_power), ("BitLocker", row_bitlocker),
+        ("Windows Update", row_updates), ("AV / firewall", row_av), ("Backup agent", row_backup),
+        ("Remote access", row_remote), ("Profiles", row_profiles), ("Local users", row_users),
+        ("Local Administrators", row_admins), ("Applications", make_row_apps(note)),
+        ("Collector errors", row_errors),
+    ]
+
+    hdr = ["Field"] + [f"`{(i.get('host') or {}).get('name', '?').lower()}` ({date(i.get('collected'))})" for i in invs]
+    print("| " + " | ".join(hdr) + " |")
+    print("|" + "---|" * len(hdr))
+    for label, fn in rows:
+        cells = []
+        for i in invs:
+            try:
+                cells.append(esc(fn(i)))
+            except Exception as e:  # one malformed section must not sink the table
+                cells.append(f"render error: {esc(e)}")
+        print(f"| {label} | " + " | ".join(cells) + " |")
+
+    if args.apps:
+        for i in invs:
+            name = (i.get("host") or {}).get("name", "?").lower()
+            print(f"\n### Applications — `{name}` ({date(i.get('collected'))})\n")
+            print("| Name | Version | Publisher | Scope |\n|---|---|---|---|")
+            for a in i.get("applications") or []:
+                print(f"| {esc(a.get('name'))} | {esc(a.get('version') or '')} | {esc(a.get('publisher') or '')} | {a.get('scope')} |")
+
+
+if __name__ == "__main__":
+    main()

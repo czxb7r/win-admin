@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit checks for scripts/*.ps1: ASCII-only, and a PowerShell parse check (needs pwsh).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ $# -gt 0 ]] || set -- scripts/*.ps1
+rc=0
+tools/check-ascii "$@" || rc=1
+if command -v pwsh >/dev/null; then
+    pwsh -NoProfile -File tools/parse-check.ps1 "$@" || rc=1
+else
+    echo "check: pwsh not installed; parse check skipped" >&2
+fi
+[[ $rc -eq 0 ]] && echo "check: OK ($# file(s))"
+exit $rc
