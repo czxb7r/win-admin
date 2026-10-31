@@ -14,6 +14,8 @@
          is enabled and in Administrators (by SID, so any Windows language
          works). If missing, it is created and the password is typed at the
          prompt. This is the operator's account, not the client's own admin.
+         It is hidden from the sign-in screen (Winlogon SpecialAccounts
+         UserList), since it is for SSH only; -ShowOnSignIn shows it again.
       3. Installs the OpenSSH Server optional feature if needed.
       4. sshd: Automatic start, started.
       5. Default SSH shell -> Windows PowerShell 5.1.
@@ -35,7 +37,8 @@
     Idempotent -- safe to re-run. Logs the run to -LogDir.
 
 .PARAMETER Config
-    Optional JSON file. Keys used: AdminUser, AllowFrom, PublicKeys, LogDir.
+    Optional JSON file. Keys used: AdminUser, AllowFrom, PublicKeys, LogDir,
+    ShowOnSignIn.
     Precedence: command-line argument > config file > built-in default.
 
 .PARAMETER AdminUser
@@ -52,6 +55,12 @@
 
 .PARAMETER LogDir
     Transcript directory. Default C:\tmp.
+
+.PARAMETER ShowOnSignIn
+    Show -AdminUser on the Windows sign-in screen. By default it is hidden
+    (it is for SSH only; the client's own admin account is used at the
+    console). On a workgroup machine a hidden account cannot be picked at the
+    console at all, so re-run with -ShowOnSignIn if console access is needed.
 
 .PARAMETER NoPause
     Skip the closing "Press Enter" prompt. Implied when run over SSH.
@@ -71,6 +80,7 @@ param(
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEbE6VWMTSMGUD/X8DTWRJCYhXrJBt9arUVrEn0Noozw"
     ),
     [string]$LogDir = "C:\tmp",
+    [switch]$ShowOnSignIn,
     [switch]$NoPause
 )
 
@@ -92,7 +102,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if ($Config) {
     if (-not (Test-Path -LiteralPath $Config)) { Write-Host "Config file not found: $Config" -ForegroundColor Red; exit 2 }
     $cfg = Get-Content -Raw -LiteralPath $Config | ConvertFrom-Json
-    foreach ($k in 'AdminUser', 'AllowFrom', 'PublicKeys', 'LogDir') {
+    foreach ($k in 'AdminUser', 'AllowFrom', 'PublicKeys', 'LogDir', 'ShowOnSignIn') {
         if (-not $PSBoundParameters.ContainsKey($k) -and $null -ne $cfg.$k) { Set-Variable -Name $k -Value $cfg.$k }
     }
 }
@@ -175,6 +185,20 @@ if (-not $isMember) {
     Add-LocalGroupMember -SID 'S-1-5-32-544' -Member $AdminUser
     Ok "Added $AdminUser to $adminsGroup"
 } else { Ok "$AdminUser is in $adminsGroup" }
+
+# Sign-in screen visibility: a DWORD named for the account, 0 = hidden.
+$userList = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+$hidden = (Get-ItemProperty -Path $userList -Name $AdminUser -ErrorAction SilentlyContinue).$AdminUser
+if ($ShowOnSignIn) {
+    if ($null -ne $hidden) { Remove-ItemProperty -Path $userList -Name $AdminUser; Ok "$AdminUser shown on the sign-in screen again" }
+    else { Ok "$AdminUser is shown on the sign-in screen (-ShowOnSignIn)" }
+} elseif ($hidden -eq 0) {
+    Ok "$AdminUser is hidden from the sign-in screen"
+} else {
+    if (-not (Test-Path $userList)) { New-Item -Path $userList -Force | Out-Null }
+    New-ItemProperty -Path $userList -Name $AdminUser -PropertyType DWord -Value 0 -Force | Out-Null
+    Ok "$AdminUser hidden from the sign-in screen (SSH only; -ShowOnSignIn to show it)"
+}
 
 # ---- 3. OpenSSH Server feature -------------------------------------------
 Step "OpenSSH Server feature"

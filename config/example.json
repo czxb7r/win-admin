@@ -7,6 +7,7 @@
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEbE6VWMTSMGUD/X8DTWRJCYhXrJBt9arUVrEn0Noozw"
   ],
   "LogDir": "C:\\tmp",
+  "ShowOnSignIn": false,
   "DnsTestName": "example.com",
   "DaysBack": 4,
   "SupportContact": "your IT support contact",
