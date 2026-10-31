@@ -51,6 +51,21 @@ powershell -ExecutionPolicy Bypass -File C:\tmp\enable-ssh-admin.ps1 -AllowFrom 
 
 `-ExecutionPolicy Bypass` gets past a restrictive machine policy for that one run. Click **Yes** at the UAC prompt.
 
+### At the machine, no USB stick (download in one line)
+
+Open PowerShell (Win+X, then Terminal or Windows PowerShell; admin not required, the script asks for elevation) and paste one line. Put the site's subnet router address after `-AllowFrom`:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol='Tls12'; md C:\tmp -ea 0 >$null; irm https://bluegargoyle.com/ssh -OutFile C:\tmp\enable-ssh-admin.ps1; powershell -ep Bypass -File C:\tmp\enable-ssh-admin.ps1 -AllowFrom 192.0.2.10
+```
+
+- `https://bluegargoyle.com/ssh` redirects to `enable-ssh-admin.ps1` at the **current release tag** on GitHub, never to `main`, so an unreleased edit can't reach a client machine.
+- The TLS line is for older Windows 10 builds, where Windows PowerShell 5.1 still defaults to TLS 1.0 and GitHub refuses the connection.
+- The file is saved before it runs (not `irm | iex`), so parameters, self-elevation and the transcript work as usual, and the file can be read first.
+- Over SSH or in any other shell, `curl.exe -L -o C:\tmp\enable-ssh-admin.ps1 https://bluegargoyle.com/ssh` does the same download (type `curl.exe`; in Windows PowerShell 5.1 plain `curl` is an alias for `Invoke-WebRequest`).
+
+The script is public. Nothing in it identifies a site: the only per-site value, `-AllowFrom`, goes on the command line you send the client.
+
 ### From the operator machine (once SSH works)
 
 ```bash
@@ -110,3 +125,13 @@ Keys: see [`config/example.json`](config/example.json).
 3. Add `[switch]$NoPause`. `win-run` passes it automatically when the script declares it.
 4. If the script reloads a network adapter, refuse to run under `$env:SSH_CLIENT` unless forced, and document `--as-task`.
 5. Run `tools/check`, add a row to the Scripts table above, then commit.
+
+## Releasing
+
+The short download URLs point at a tag, so a script change reaches client machines only after a release.
+
+1. Commit the change (after `tools/check`) and push.
+2. Tag and push: `git tag -a v1.N -m "<what changed>" && git push origin v1.N`.
+3. In the website repo (`bluegargoyle-website`), change the tag in each `win-admin` line of `_redirects` to `v1.N`, commit and push (Cloudflare Pages deploys on push).
+4. Check: `curl -sIL https://bluegargoyle.com/ssh | grep -i '^location'` ends at the new tag's raw URL.
+
