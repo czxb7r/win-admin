@@ -53,10 +53,10 @@ powershell -ExecutionPolicy Bypass -File C:\tmp\enable-ssh-admin.ps1 -AllowFrom 
 
 ### At the machine, no USB stick (download in one line)
 
-Open PowerShell (Win+X, then Terminal or Windows PowerShell; admin not required, the script asks for elevation) and paste one line. Put the site's subnet router address after `-AllowFrom`:
+Open Command Prompt, PowerShell or Windows Terminal (admin not required; the script asks for elevation) and paste one line. It works in all three: it starts Windows PowerShell itself and contains no `$`, which the shells treat differently. Put the site's subnet router address after `-AllowFrom`:
 
-```powershell
-[Net.ServicePointManager]::SecurityProtocol='Tls12'; md C:\tmp -ea 0 >$null; irm https://bluegargoyle.com/ssh -OutFile C:\tmp\enable-ssh-admin.ps1; powershell -ep Bypass -File C:\tmp\enable-ssh-admin.ps1 -AllowFrom 192.0.2.10
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; md C:\tmp -ea 0 | Out-Null; irm https://bluegargoyle.com/ssh -OutFile C:\tmp\enable-ssh-admin.ps1; C:\tmp\enable-ssh-admin.ps1 -AllowFrom 192.0.2.10"
 ```
 
 - `https://bluegargoyle.com/ssh` redirects to `enable-ssh-admin.ps1` at the **current release tag** on GitHub, never to `main`, so an unreleased edit can't reach a client machine.
