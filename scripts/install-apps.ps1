@@ -16,7 +16,8 @@
       3. refuses to install unless the MSI's signature is Valid and its signer
          is the expected publisher, and/or (entries with Sha256) the file's
          SHA-256 matches
-      4. runs msiexec /qn /norestart (verbose MSI log kept in -LogDir)
+      4. runs msiexec /qn /norestart, plus the entry's MsiArgs if it has any
+         (verbose MSI log kept in -LogDir)
       5. checks the uninstall entries again
 
     Chrome and Firefox keep themselves updated afterwards (Google Update,
@@ -115,7 +116,7 @@ foreach ($prop in $cat.Apps.PSObject.Properties) {
         exit 2
     }
     $name = if ($e.Name) { $e.Name } else { $prop.Name }
-    $known[$prop.Name.ToLower()] = @{ Name = $name; Url = $e.Url; Signer = $e.Signer; Sha256 = $e.Sha256; Match = $e.Match }
+    $known[$prop.Name.ToLower()] = @{ Name = $name; Url = $e.Url; Signer = $e.Signer; Sha256 = $e.Sha256; Match = $e.Match; MsiArgs = $e.MsiArgs }
 }
 
 $Apps = @($Apps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
@@ -193,8 +194,9 @@ foreach ($key in $Apps) {
 
         $msiLog = Join-Path $LogDir "install-apps_${key}_${env:COMPUTERNAME}_${stamp}.msi.log"
         Write-Host "  installing (msiexec /qn)..."
+        # MsiArgs: extra public properties from the catalog (e.g. Zoom's auto-update switch).
         $p = Start-Process -FilePath msiexec.exe -Wait -PassThru `
-            -ArgumentList ('/i "{0}" /qn /norestart /l*v "{1}"' -f $msi, $msiLog)
+            -ArgumentList ('/i "{0}" /qn /norestart {2} /l*v "{1}"' -f $msi, $msiLog, $app.MsiArgs)
         # 3010 / 1641: installed, reboot required / initiated.
         if ($p.ExitCode -eq 3010 -or $p.ExitCode -eq 1641) { $reboot = $true }
         elseif ($p.ExitCode -ne 0) { throw ("msiexec exit code {0}; log {1}" -f $p.ExitCode, $msiLog) }

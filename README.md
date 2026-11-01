@@ -134,6 +134,7 @@ Each entry, keyed by the name clients use:
 | `Url` | The vendor's MSI over `https://` (a stable "latest" link) |
 | `Signer` | The `O=` of the MSI's signing certificate. The install is refused unless the signature is Valid and names it |
 | `Sha256` | For a vendor that doesn't sign its MSI (7-Zip): the exact file's SHA-256, so `Url` must point at one pinned version. The install is refused unless the download matches. Take it from a published checksum (e.g. the GitHub release asset's digest, `gh api repos/<owner>/<repo>/releases/tags/<tag>`) and confirm it against the file you downloaded |
+| `MsiArgs` | Optional extra `msiexec` properties for that MSI, appended to `/i ... /qn /norestart`. Only for settings the vendor documents for silent installs, such as Zoom's update switches |
 | `Match` | Wildcard on the `DisplayName` of the machine-wide uninstall entry, used to detect an existing install |
 | `Name` | Display only |
 
@@ -141,7 +142,7 @@ Every entry needs `Signer`, `Sha256`, or both (both are checked when both are gi
 
 **Pinned entries don't update.** Chrome and Firefox use vendor "latest" links and update themselves once installed. A `Sha256` entry is one fixed version: a new release means editing its `Url`, `Sha256` and `Name` and cutting a win-admin release, and machines that already have the application keep their version (install-apps skips installed applications; there is no upgrade mode yet). 7-Zip has no updater of its own.
 
-Current catalog: `chrome`, `firefox` (signed, vendor "latest" links, update themselves); `7zip` (26.05, pinned by SHA-256; the 7-Zip MSI is not signed); `vlc` (3.0.24, signed by VideoLAN **and** pinned by SHA-256: VideoLAN has no stable "latest" MSI link, and the file comes from third-party mirrors). VLC only notifies about new versions; it doesn't install them unattended.
+Current catalog: `chrome`, `firefox` (signed, vendor "latest" links, update themselves); `7zip` (26.05, pinned by SHA-256; the 7-Zip MSI is not signed); `vlc` (3.0.24, signed by VideoLAN **and** pinned by SHA-256: VideoLAN has no stable "latest" MSI link, and the file comes from third-party mirrors). VLC only notifies about new versions; it doesn't install them unattended. `zoom` (signed by Zoom Communications, vendor "latest" link) needs `MsiArgs`: Zoom's MSI turns automatic updates **off** unless told otherwise (Zoom's Automatic Update Explainer), so the entry passes both the current switch (`ZConfig="AU2_EnableAutoUpdate=true"`) and the legacy one (`ZoomAutoUpdate="true"`). With only the AU2 switch the MSI still wrote `HKLM\SOFTWARE\Zoom\MSI\DisableUpdate = true`; with both it writes `false`. Not yet seen: an actual update arriving (needs Zoom's next release).
 
 To add an application:
 

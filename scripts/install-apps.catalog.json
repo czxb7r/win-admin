@@ -1,6 +1,6 @@
 {
   "Schema": "win-admin/apps-catalog/v1",
-  "About": "Applications install-apps.ps1 can install. Key = the name used in -Apps / client.json Apps. Url = vendor's MSI over https. Signer = O= of the MSI's Authenticode signing certificate; the install is refused unless the signature is Valid and names it. Sha256 = for a vendor that doesn't sign its MSI: the exact file's SHA-256, so Url must point at that one pinned version; the install is refused unless the download matches. Every entry needs Signer, Sha256 or both. Pinned (Sha256) entries change only by editing Url + Sha256 and releasing, and install-apps doesn't upgrade an existing install. Match = wildcard on the DisplayName of the machine-wide uninstall entry, used to detect an existing install. Name = display only.",
+  "About": "Applications install-apps.ps1 can install. Key = the name used in -Apps / client.json Apps. Url = vendor's MSI over https. Signer = O= of the MSI's Authenticode signing certificate; the install is refused unless the signature is Valid and names it. Sha256 = for a vendor that doesn't sign its MSI: the exact file's SHA-256, so Url must point at that one pinned version; the install is refused unless the download matches. Every entry needs Signer, Sha256 or both. Pinned (Sha256) entries change only by editing Url + Sha256 and releasing, and install-apps doesn't upgrade an existing install. MsiArgs = optional extra msiexec properties for that MSI (e.g. Zoom's auto-update switch, which its MSI leaves off). Match = wildcard on the DisplayName of the machine-wide uninstall entry, used to detect an existing install. Name = display only.",
   "Apps": {
     "chrome": {
       "Name": "Google Chrome",
@@ -26,6 +26,13 @@
       "Signer": "VideoLAN",
       "Sha256": "22172095CE4C2D5F5B600BB4C142D78105DB29A77FA59A931941876F3B20F6D0",
       "Match": "VLC media player*"
+    },
+    "zoom": {
+      "Name": "Zoom Workplace",
+      "Url": "https://zoom.us/client/latest/ZoomInstallerFull.msi?archType=x64",
+      "Signer": "Zoom Communications, Inc.",
+      "MsiArgs": "ZoomAutoUpdate=\"true\" ZConfig=\"AU2_EnableAutoUpdate=true\"",
+      "Match": "Zoom Workplace*"
     }
   }
 }
