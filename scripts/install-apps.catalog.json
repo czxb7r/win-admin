@@ -1,6 +1,6 @@
 {
   "Schema": "win-admin/apps-catalog/v1",
-  "About": "Applications install-apps.ps1 can install. Key = the name used in -Apps / client.json Apps. Url = vendor's MSI over https. Signer = O= of the MSI's Authenticode signing certificate; the install is refused unless the signature is Valid and names it. Match = wildcard on the DisplayName of the machine-wide uninstall entry, used to detect an existing install. Name = display only.",
+  "About": "Applications install-apps.ps1 can install. Key = the name used in -Apps / client.json Apps. Url = vendor's MSI over https. Signer = O= of the MSI's Authenticode signing certificate; the install is refused unless the signature is Valid and names it. Sha256 = for a vendor that doesn't sign its MSI: the exact file's SHA-256, so Url must point at that one pinned version; the install is refused unless the download matches. Every entry needs Signer, Sha256 or both. Pinned (Sha256) entries change only by editing Url + Sha256 and releasing, and install-apps doesn't upgrade an existing install. Match = wildcard on the DisplayName of the machine-wide uninstall entry, used to detect an existing install. Name = display only.",
   "Apps": {
     "chrome": {
       "Name": "Google Chrome",
@@ -13,6 +13,12 @@
       "Url": "https://download.mozilla.org/?product=firefox-msi-latest-ssl&os=win64&lang=en-US",
       "Signer": "Mozilla Corporation",
       "Match": "Mozilla Firefox*"
+    },
+    "7zip": {
+      "Name": "7-Zip 26.05",
+      "Url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-x64.msi",
+      "Sha256": "3FE4AB99FA15629C652944309A2B2BC6E41FC933FC6B63F5DF1EBCF3AEA68263",
+      "Match": "7-Zip *"
     }
   }
 }

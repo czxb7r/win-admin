@@ -7,17 +7,21 @@
     The catalog, install-apps.catalog.json (shipped next to this script), gives
     each application a vendor download URL, the publisher its Authenticode
     signature must name, and the uninstall-entry name that shows it is
-    installed. For every requested application the script:
+    installed. A vendor that doesn't sign its MSI gets a pinned Url and the
+    file's SHA-256 instead of a publisher. For every requested application the
+    script:
 
       1. checks the machine-wide uninstall entries; if present, skips it
       2. downloads the vendor MSI over HTTPS
       3. refuses to install unless the MSI's signature is Valid and its signer
-         is the expected publisher
+         is the expected publisher, and/or (entries with Sha256) the file's
+         SHA-256 matches
       4. runs msiexec /qn /norestart (verbose MSI log kept in -LogDir)
       5. checks the uninstall entries again
 
-    The applications keep themselves updated afterwards (Google Update, Mozilla
-    Maintenance Service), so this is a setup step, not an update tool.
+    Chrome and Firefox keep themselves updated afterwards (Google Update,
+    Mozilla Maintenance Service). Pinned entries (7-Zip) stay at the installed
+    version; this is a setup step, not an update tool.
 
     Runs in a plain elevated SSH session (no SYSTEM scheduled task), so it can
     be used on machines with an EDR agent.
@@ -105,12 +109,13 @@ if ($cat.Schema -ne 'win-admin/apps-catalog/v1' -or -not $cat.Apps) {
 $known = [ordered]@{}
 foreach ($prop in $cat.Apps.PSObject.Properties) {
     $e = $prop.Value
-    if ($e.Url -notlike 'https://*' -or -not $e.Signer -or -not $e.Match) {
-        Write-Host "Catalog entry '$($prop.Name)' needs an https:// Url, a Signer and a Match: $Catalog" -ForegroundColor Red
+    if ($e.Url -notlike 'https://*' -or -not $e.Match -or -not ($e.Signer -or $e.Sha256) -or
+        ($e.Sha256 -and $e.Sha256 -notmatch '^[0-9A-Fa-f]{64}$')) {
+        Write-Host "Catalog entry '$($prop.Name)' needs an https:// Url, a Match, and a Signer or a 64-hex-digit Sha256: $Catalog" -ForegroundColor Red
         exit 2
     }
     $name = if ($e.Name) { $e.Name } else { $prop.Name }
-    $known[$prop.Name.ToLower()] = @{ Name = $name; Url = $e.Url; Signer = $e.Signer; Match = $e.Match }
+    $known[$prop.Name.ToLower()] = @{ Name = $name; Url = $e.Url; Signer = $e.Signer; Sha256 = $e.Sha256; Match = $e.Match }
 }
 
 $Apps = @($Apps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
@@ -170,12 +175,21 @@ foreach ($key in $Apps) {
         Write-Host "  downloading $($app.Url)"
         Invoke-WebRequest -Uri $app.Url -OutFile $msi -UseBasicParsing
 
-        $sig = Get-AuthenticodeSignature -FilePath $msi
-        $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '(none)' }
-        if ($sig.Status -ne 'Valid' -or $signer -notmatch ('O="?' + [regex]::Escape($app.Signer))) {
-            throw ("signature check failed: status {0}, signer {1}; expected {2}" -f $sig.Status, $signer, $app.Signer)
+        if ($app.Sha256) {
+            $hash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash
+            if ($hash -ne $app.Sha256.ToUpper()) {
+                throw ("SHA-256 mismatch: got {0}; catalog has {1}" -f $hash, $app.Sha256.ToUpper())
+            }
+            Write-Host "  SHA-256 matches the catalog"
         }
-        Write-Host ("  signature Valid: {0}" -f $app.Signer)
+        if ($app.Signer) {
+            $sig = Get-AuthenticodeSignature -FilePath $msi
+            $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '(none)' }
+            if ($sig.Status -ne 'Valid' -or $signer -notmatch ('O="?' + [regex]::Escape($app.Signer))) {
+                throw ("signature check failed: status {0}, signer {1}; expected {2}" -f $sig.Status, $signer, $app.Signer)
+            }
+            Write-Host ("  signature Valid: {0}" -f $app.Signer)
+        }
 
         $msiLog = Join-Path $LogDir "install-apps_${key}_${env:COMPUTERNAME}_${stamp}.msi.log"
         Write-Host "  installing (msiexec /qn)..."
@@ -193,6 +207,8 @@ foreach ($key in $Apps) {
     } catch {
         Write-Host ("  FAILED: {0}" -f $_.Exception.Message) -ForegroundColor Red
         $failed++
+        # Never leave a rejected or half-installed download lying around.
+        Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue
     }
 }
 
