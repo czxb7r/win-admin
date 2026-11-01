@@ -19,6 +19,13 @@
       "Url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-x64.msi",
       "Sha256": "3FE4AB99FA15629C652944309A2B2BC6E41FC933FC6B63F5DF1EBCF3AEA68263",
       "Match": "7-Zip *"
+    },
+    "vlc": {
+      "Name": "VLC media player 3.0.24",
+      "Url": "https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.msi",
+      "Signer": "VideoLAN",
+      "Sha256": "22172095CE4C2D5F5B600BB4C142D78105DB29A77FA59A931941876F3B20F6D0",
+      "Match": "VLC media player*"
     }
   }
 }

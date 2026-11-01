@@ -141,11 +141,12 @@ Every entry needs `Signer`, `Sha256`, or both (both are checked when both are gi
 
 **Pinned entries don't update.** Chrome and Firefox use vendor "latest" links and update themselves once installed. A `Sha256` entry is one fixed version: a new release means editing its `Url`, `Sha256` and `Name` and cutting a win-admin release, and machines that already have the application keep their version (install-apps skips installed applications; there is no upgrade mode yet). 7-Zip has no updater of its own.
 
-Current catalog: `chrome`, `firefox` (signed), `7zip` (26.05, pinned by SHA-256; the 7-Zip MSI is not signed).
+Current catalog: `chrome`, `firefox` (signed, vendor "latest" links, update themselves); `7zip` (26.05, pinned by SHA-256; the 7-Zip MSI is not signed); `vlc` (3.0.24, signed by VideoLAN **and** pinned by SHA-256: VideoLAN has no stable "latest" MSI link, and the file comes from third-party mirrors). VLC only notifies about new versions; it doesn't install them unattended.
 
 To add an application:
 
 1. Download the vendor's MSI on a Windows machine and read its signer: `(Get-AuthenticodeSignature .\app.msi).SignerCertificate.Subject` (use the `O=` value). If the status is `NotSigned`, use a version-specific URL and `Sha256` instead (`(Get-FileHash .\app.msi).Hash`, confirmed against the vendor's published checksum).
+   Download it **with PowerShell**, not only with curl: some download sites send a web page to a client they take for a browser (`get.videolan.org` gave PowerShell a 29 KB HTML page where curl got a redirect to the MSI). Check the size against the vendor's, and prefer the URL that returns the file (for VLC, `download.videolan.org/pub/videolan/...`). The script's signature/hash check refuses a web page anyway, but the entry has to point at a URL that works.
 2. Install it once and read its `DisplayName` from `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*` (or `WOW6432Node`) for `Match`.
 3. Add the entry, run `tools/check`, test with `win-run <host> install-apps -Apps <name>`, commit, and release (the download URLs serve the catalog at the release tag).
 
