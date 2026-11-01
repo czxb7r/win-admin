@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Pre-commit checks for scripts/*.ps1: ASCII-only, and a PowerShell parse check (needs pwsh).
+# With no arguments it also checks scripts/*.json (companion data files): ASCII-only, valid JSON.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[[ $# -gt 0 ]] || set -- scripts/*.ps1
 rc=0
+if [[ $# -eq 0 ]]; then
+    set -- scripts/*.ps1
+    for j in scripts/*.json; do
+        [[ -f "$j" ]] || continue
+        tools/check-ascii "$j" || rc=1
+        python3 -m json.tool "$j" >/dev/null || { echo "check: invalid JSON: $j" >&2; rc=1; }
+    done
+fi
 tools/check-ascii "$@" || rc=1
 if command -v pwsh >/dev/null; then
     pwsh -NoProfile -File tools/parse-check.ps1 "$@" || rc=1

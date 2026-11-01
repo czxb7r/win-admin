@@ -8,11 +8,11 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 
 | Path | What |
 |---|---|
-| `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11) |
+| `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11), plus companion data files (`<script>.*.json`, e.g. `install-apps.catalog.json`) |
 | `bin/win-run` | Mac/Linux runner: upload a script (+ optional config) over SSH, run it, return its exit code, clean up |
 | `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists) |
 | `config/example.json` | Every config key any script understands, with placeholder values |
-| `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`) |
+| `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`); companion JSON files ASCII-only + valid JSON |
 
 ## Scripts
 
@@ -20,7 +20,7 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 |---|---|---|
 | [`enable-ssh-admin.ps1`](scripts/enable-ssh-admin.ps1) | **Yes** | One-time bootstrap of key-based OpenSSH admin access: operator account in Administrators and hidden from the sign-in screen (`-ShowOnSignIn` to show it), OpenSSH Server, PowerShell as default shell, `administrators_authorized_keys` with locked ACL, firewall rule on all profiles scoped to `-AllowFrom`, and an `sshd_config` block that turns off password/keyboard-interactive logins and allows only the admin user from `-AllowFrom` (`AllowUsers user@addr`; holds even where a third-party firewall such as Norton ignores the Windows rule). Validated with `sshd -t`, rolled back if invalid. Prints the host-key fingerprint. Requires `-AllowFrom`. |
 | [`disable-network-power-saving.ps1`](scripts/disable-network-power-saving.ps1) | **Yes** | Turns off NIC/OS power saving that kills a wired link at idle (allow-turn-off, EEE/Green Ethernet, adapter and USB selective suspend, PCIe ASPM, Fast Startup), and sets sleep and hibernate on AC power to never, the standard for every client machine (battery timeouts untouched). Reloads the adapters by default, so over SSH either pass `-NoReload` (stages the changes, then reboot) or use `win-run --as-task`. Behind an EDR agent use `-NoReload` (see below). |
-| [`install-apps.ps1`](scripts/install-apps.ps1) | **Yes** | Installs a site's standard applications (`-Apps`, or `Apps` in the config) from the vendors' own MSI packages, machine-wide and silent: skips anything already installed (machine-wide uninstall entry), downloads over HTTPS, refuses to install unless the Authenticode signature is Valid and names the expected publisher, runs `msiexec /qn /norestart` (verbose MSI log in `-LogDir`), then checks the uninstall entry. Built-in catalog: `chrome` (Chrome Enterprise MSI), `firefox` (Firefox MSI); both keep themselves updated afterwards. Works in a plain SSH session (no `--as-task`), so it can be used behind an EDR agent. Ends with `RESULT requested= installed= present= failed= reboot=`. |
+| [`install-apps.ps1`](scripts/install-apps.ps1) | **Yes** | Installs a site's standard applications (`-Apps`, or `Apps` in the config) from the vendors' own MSI packages, machine-wide and silent. Which applications exist, and where each comes from, is in the catalog [`install-apps.catalog.json`](scripts/install-apps.catalog.json) next to the script (see [Application catalog](#application-catalog)). Skips anything already installed (machine-wide uninstall entry), downloads over HTTPS, refuses to install unless the Authenticode signature is Valid and names the catalog's publisher, runs `msiexec /qn /norestart` (verbose MSI log in `-LogDir`), then checks the uninstall entry. Works in a plain SSH session (no `--as-task`), so it can be used behind an EDR agent. Ends with `RESULT requested= installed= present= failed= reboot=`. |
 | [`install-updates.ps1`](scripts/install-updates.ps1) | **Yes** | One Windows Update cycle through the Windows Update Agent API: search, download, install everything Windows would install on its own (security/cumulative updates, automatic drivers and firmware); optional updates are listed, never installed. Never reboots; ends with a machine-readable `RESULT pending= installed= failed= optional= hidden= reboot=` line, so it can be run in a loop with reboots in between until `pending=0`. `-ScanOnly` lists only. `-Hide`/`-Unhide` (title, wildcards) stop or restore an update that installs "Succeeded" but is offered again every scan. Everything except `-ScanOnly` must run as SYSTEM (Windows Update returns access denied to an SSH logon), so over SSH use `win-run --as-task --timeout 3600`; behind an EDR agent, scan over SSH and install at the machine. |
 | [`get-inventory.ps1`](scripts/get-inventory.ps1) | No | Configuration inventory as JSON: hardware (serial, CPU, RAM modules, disks), OS build, volumes, AD/Entra join, NICs and their power-saving state, BitLocker, AV/Defender/firewall, Windows Update (history, pending, policy), local users/admins/profiles, installed apps, remote-access services, power settings. Over SSH it prints JSON to stdout and writes nothing to disk. `-SkipUpdateSearch` skips the online pending-update search. |
 | [`netdrop-diag.ps1`](scripts/netdrop-diag.ps1) | No | Network-loss evidence collector (adapters, power management, sleep/wake, connectivity, event logs) into a zip. Run while the failure is live, before rebooting. |
@@ -29,7 +29,7 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 
 **Parameters and config.** Every per-site value is a parameter. Each script also takes `-Config <file.json>`. Precedence: **command-line argument > config file > built-in default**, decided with `$PSBoundParameters.ContainsKey()`. A config file is never required, so a script copied onto a USB stick still works on its own. Scripts read only the keys they know, so one client config file can serve every script. List-valued parameters accept either an array or a comma-separated string.
 
-**Self-contained.** Each `.ps1` is a single file with no dot-sourced helpers, because it has to work when pasted or copied onto a machine with nothing else on it. The config-loading and self-elevation blocks are therefore repeated in each script. Keep them identical.
+**Self-contained.** Each `.ps1` is a single file with no dot-sourced helpers, because it has to work when pasted or copied onto a machine with nothing else on it. The config-loading and self-elevation blocks are therefore repeated in each script. Keep them identical. The one exception is **data** a script needs that isn't per-site and changes independently of the code: it goes in a companion file `<script>.<name>.json` next to the script (so far only `install-apps.catalog.json`), read from the script's own folder. `win-run` uploads companion files with the script and removes them afterwards, and the download URLs serve them like scripts.
 
 **ASCII only.** Windows PowerShell 5.1 reads a BOM-less UTF-8 `.ps1` as Windows-1252, so a single em dash breaks parsing of the whole file and nothing runs. `tools/check` and `win-run` both refuse non-ASCII files.
 
@@ -79,7 +79,7 @@ win-run [-c client.json] [--file | --as-task] <host> <script> [script args...]
 - `--as-task` runs it as a one-off SYSTEM scheduled task and polls until it finishes. Use it for anything that bounces the network adapter the SSH session uses: run directly, the session can die mid-run and leave the NIC disabled.
 - **Not behind an EDR agent.** EDR products (seen with SentinelOne) flag a scheduled task created from a remote session and running as SYSTEM as lateral movement, and kill the whole session's process tree, `sshd` included. On EDR-protected machines run scripts directly (plain `win-run`), and give network-affecting scripts a staged mode that writes settings without dropping the link, then reboot. Plain `win-run` (read-only collectors, CIM queries) has not been flagged.
 - `--file` launches the script with `powershell -File`, and does setup and cleanup with plain commands, so no `-EncodedCommand` is used at all. Use it on hosts whose AV kills encoded PowerShell. Seen with **Norton 360**: an encoded session that wraps a script block or starts system queries is killed silently, so `win-run` prints nothing and still exits 0. A bare one-line encoded command gets through, so a quick test can mislead. With `--file`, errors go to stderr instead of being merged into stdout.
-- Uploads go to `C:\tmp\win-admin\` and are removed afterwards (`--keep` leaves them). The script's transcript and output stay in `C:\tmp`.
+- Uploads (the script, the config, and any `<script>.*.json` companion file next to the script) go to `C:\tmp\win-admin\` and are removed afterwards (`--keep` leaves them). The script's transcript and output stay in `C:\tmp`.
 
 ```bash
 win-run pc01 netdrop-diag -DnsTestName example.com
@@ -122,6 +122,33 @@ A client repo does **not** copy the scripts. It holds:
 ```
 
 Keys: see [`config/example.json`](config/example.json).
+
+## Application catalog
+
+[`scripts/install-apps.catalog.json`](scripts/install-apps.catalog.json) lists every application `install-apps` can install. Client configs only pick names from it (`"Apps": ["chrome", "firefox"]`); where an installer comes from and who must have signed it is decided here, in this reviewed public repo, never in a client file. For the same reason the script's `-Catalog` parameter (another catalog file) is not read from `-Config`.
+
+Each entry, keyed by the name clients use:
+
+| Field | Meaning |
+|---|---|
+| `Url` | The vendor's MSI over `https://` (a stable "latest" link) |
+| `Signer` | The `O=` of the MSI's signing certificate. The install is refused unless the signature is Valid and names it |
+| `Match` | Wildcard on the `DisplayName` of the machine-wide uninstall entry, used to detect an existing install |
+| `Name` | Display only |
+
+The script refuses to run (exit 2) if the catalog is missing, isn't valid JSON, has a different `Schema`, or has an entry without an `https://` Url, a Signer and a Match.
+
+To add an application:
+
+1. Download the vendor's MSI on a Windows machine and read its signer: `(Get-AuthenticodeSignature .\app.msi).SignerCertificate.Subject` (use the `O=` value).
+2. Install it once and read its `DisplayName` from `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*` (or `WOW6432Node`) for `Match`.
+3. Add the entry, run `tools/check`, test with `win-run <host> install-apps -Apps <name>`, commit, and release (the download URLs serve the catalog at the release tag).
+
+At the machine without SSH, download both files into the same folder:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; md C:\tmp -ea 0 | Out-Null; irm https://bluegargoyle.com/win/install-apps.catalog.json -OutFile C:\tmp\install-apps.catalog.json; irm https://bluegargoyle.com/win/install-apps.ps1 -OutFile C:\tmp\install-apps.ps1; C:\tmp\install-apps.ps1 -Apps chrome,firefox"
+```
 
 ## Adding a script
 

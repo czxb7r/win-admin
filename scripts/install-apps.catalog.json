@@ -1,0 +1,18 @@
+{
+  "Schema": "win-admin/apps-catalog/v1",
+  "About": "Applications install-apps.ps1 can install. Key = the name used in -Apps / client.json Apps. Url = vendor's MSI over https. Signer = O= of the MSI's Authenticode signing certificate; the install is refused unless the signature is Valid and names it. Match = wildcard on the DisplayName of the machine-wide uninstall entry, used to detect an existing install. Name = display only.",
+  "Apps": {
+    "chrome": {
+      "Name": "Google Chrome",
+      "Url": "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi",
+      "Signer": "Google LLC",
+      "Match": "Google Chrome"
+    },
+    "firefox": {
+      "Name": "Mozilla Firefox",
+      "Url": "https://download.mozilla.org/?product=firefox-msi-latest-ssl&os=win64&lang=en-US",
+      "Signer": "Mozilla Corporation",
+      "Match": "Mozilla Firefox*"
+    }
+  }
+}

@@ -12,7 +12,8 @@ usage() {
 Usage: win-run [options] <host> <script> [script args...]
 
 Uploads <script> (a path, or a name under win-admin/scripts/, ".ps1" optional)
-to C:\tmp\win-admin on <host>, runs it with Windows PowerShell, prints its
+to C:\tmp\win-admin on <host> (with any <script>.*.json companion data
+file next to it), runs it with Windows PowerShell, prints its
 output, removes the uploaded files and exits with the script's exit code.
 Script args are passed through verbatim as PowerShell arguments.
 
@@ -91,7 +92,12 @@ if [[ ! -f "$script" ]]; then
 fi
 [[ -z "$config" || -f "$config" ]] || die "no such config file: $config"
 
-"$WIN_ADMIN/tools/check-ascii" "$script" ${config:+"$config"} >&2 || die "non-ASCII bytes: Windows PowerShell 5.1 would misparse the file"
+# Companion data files (<script>.*.json next to the script, e.g. install-apps.catalog.json)
+# are uploaded with it and removed afterwards.
+companions=()
+for f in "${script%.ps1}".*.json; do if [[ -f "$f" ]]; then companions+=("$f"); fi; done
+
+"$WIN_ADMIN/tools/check-ascii" "$script" ${config:+"$config"} ${companions[@]+"${companions[@]}"} >&2 || die "non-ASCII bytes: Windows PowerShell 5.1 would misparse the file"
 
 base="$(basename "$script")"
 remote_script="$REMOTE_DIR\\$base"
@@ -108,11 +114,13 @@ if [[ $file_mode -eq 1 ]]; then run_small=remote_plain; else run_small=remote_ps
 $run_small "$host" "New-Item -ItemType Directory -Force -Path $(psq "$REMOTE_DIR") | Out-Null"
 scp -q "$script" "$host:$REMOTE_DIR_FWD/$base"
 [[ -z "$config" ]] || scp -q "$config" "$host:$REMOTE_DIR_FWD/$(basename "$config")"
+for f in ${companions[@]+"${companions[@]}"}; do scp -q "$f" "$host:$REMOTE_DIR_FWD/$(basename "$f")"; done
 
 cleanup() {
     [[ $keep -eq 1 ]] && return 0
     local rm="Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $(psq "$remote_script")"
     [[ -z "$config" ]] || rm="$rm, $(psq "$remote_config")"
+    for f in ${companions[@]+"${companions[@]}"}; do rm="$rm, $(psq "$REMOTE_DIR\\$(basename "$f")")"; done
     $run_small "$host" "$rm" || echo "win-run: cleanup failed; files left in $REMOTE_DIR" >&2
 }
 

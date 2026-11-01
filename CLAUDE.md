@@ -8,7 +8,7 @@ Read `README.md` first. It is authoritative for layout, script conventions, and 
 
 - Run `tools/check` before every commit. It enforces ASCII-only content (a single em dash breaks Windows PowerShell 5.1 parsing) and runs a parse check.
 - Target Windows PowerShell 5.1 syntax, even though the local parse check uses pwsh 7.
-- Each script stays a single self-contained file. The self-elevation and config-loading blocks are repeated on purpose; change all copies together.
+- Each script stays a single self-contained file. The self-elevation and config-loading blocks are repeated on purpose; change all copies together. Exception: non-per-site data that changes independently of the code goes in a companion `<script>.<name>.json` next to the script (only `install-apps.catalog.json` so far); `win-run` uploads it with the script.
 - New per-site values become parameters plus a config key (and an entry in `config/example.json`), never hardcoded defaults.
 - No client names, IPs, domains or people in scripts or docs. Use `192.0.2.x` / `example.com` placeholders.
 

@@ -4,9 +4,10 @@
     machine-wide and silently. Skips anything already installed.
 
 .DESCRIPTION
-    Each application in the built-in catalog below has a vendor download URL,
-    the publisher its Authenticode signature must name, and the uninstall-entry
-    name that shows it is installed. For every requested application the script:
+    The catalog, install-apps.catalog.json (shipped next to this script), gives
+    each application a vendor download URL, the publisher its Authenticode
+    signature must name, and the uninstall-entry name that shows it is
+    installed. For every requested application the script:
 
       1. checks the machine-wide uninstall entries; if present, skips it
       2. downloads the vendor MSI over HTTPS
@@ -25,7 +26,9 @@
 
         RESULT requested=<n> installed=<n> present=<n> failed=<n> reboot=<True|False>
 
-    Catalog names: chrome, firefox
+    The catalog lives in win-admin, not in a client's config, so a client file
+    can choose which vetted applications to install but never where an
+    installer comes from. For the same reason -Catalog is not read from -Config.
 
 .PARAMETER Config
     Optional JSON file. Keys used: LogDir, Apps.
@@ -38,11 +41,15 @@
     Catalog names to install. Accepts a list or a comma-separated string.
     Required (argument or config).
 
+.PARAMETER Catalog
+    Catalog file. Default: install-apps.catalog.json in the script's folder.
+
 .PARAMETER NoPause
     Skip the closing "Press Enter" prompt. Implied when run over SSH or as SYSTEM.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File C:\tmp\install-apps.ps1 -Apps chrome,firefox
+    (install-apps.catalog.json must be in C:\tmp too)
 
 .EXAMPLE
     win-run -c client.json pc01 install-apps
@@ -52,6 +59,7 @@ param(
     [string]$Config = "",
     [string]$LogDir = "C:\tmp",
     [string[]]$Apps = @(),
+    [string]$Catalog = "",
     [switch]$NoPause
 )
 
@@ -82,25 +90,37 @@ if ($env:SSH_CLIENT -or $isSystem) { $NoPause = $true }
 $ProgressPreference = 'SilentlyContinue'
 
 # ---- catalog --------------------------------------------------------------
-# Url: vendor's stable "latest" MSI link. Signer: required O= of the signing
-# certificate. Match: wildcard on the uninstall entry's DisplayName.
-$catalog = [ordered]@{
-    'chrome'  = @{ Name = 'Google Chrome'
-                   Url = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
-                   Signer = 'Google LLC'; Match = 'Google Chrome' }
-    'firefox' = @{ Name = 'Mozilla Firefox'
-                   Url = 'https://download.mozilla.org/?product=firefox-msi-latest-ssl&os=win64&lang=en-US'
-                   Signer = 'Mozilla Corporation'; Match = 'Mozilla Firefox*' }
+if (-not $Catalog) { $Catalog = Join-Path $PSScriptRoot 'install-apps.catalog.json' }
+if (-not (Test-Path -LiteralPath $Catalog)) {
+    Write-Host "Catalog not found: $Catalog" -ForegroundColor Red
+    Write-Host "It ships next to the script: https://bluegargoyle.com/win/install-apps.catalog.json" -ForegroundColor Red
+    exit 2
+}
+try { $cat = Get-Content -Raw -LiteralPath $Catalog | ConvertFrom-Json }
+catch { Write-Host "Catalog is not valid JSON: $Catalog" -ForegroundColor Red; exit 2 }
+if ($cat.Schema -ne 'win-admin/apps-catalog/v1' -or -not $cat.Apps) {
+    Write-Host "Catalog has an unknown schema ('$($cat.Schema)') or no Apps: $Catalog" -ForegroundColor Red
+    exit 2
+}
+$known = [ordered]@{}
+foreach ($prop in $cat.Apps.PSObject.Properties) {
+    $e = $prop.Value
+    if ($e.Url -notlike 'https://*' -or -not $e.Signer -or -not $e.Match) {
+        Write-Host "Catalog entry '$($prop.Name)' needs an https:// Url, a Signer and a Match: $Catalog" -ForegroundColor Red
+        exit 2
+    }
+    $name = if ($e.Name) { $e.Name } else { $prop.Name }
+    $known[$prop.Name.ToLower()] = @{ Name = $name; Url = $e.Url; Signer = $e.Signer; Match = $e.Match }
 }
 
 $Apps = @($Apps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
 if ($Apps.Count -eq 0) {
-    Write-Host ("No applications requested. Pass -Apps (or Apps in -Config). Catalog: {0}" -f ($catalog.Keys -join ', ')) -ForegroundColor Red
+    Write-Host ("No applications requested. Pass -Apps (or Apps in -Config). Catalog: {0}" -f ($known.Keys -join ', ')) -ForegroundColor Red
     exit 2
 }
-$unknown = @($Apps | Where-Object { -not $catalog.Contains($_) })
+$unknown = @($Apps | Where-Object { -not $known.Contains($_) })
 if ($unknown.Count) {
-    Write-Host ("Not in the catalog: {0}. Catalog: {1}" -f ($unknown -join ', '), ($catalog.Keys -join ', ')) -ForegroundColor Red
+    Write-Host ("Not in the catalog: {0}. Catalog: {1}" -f ($unknown -join ', '), ($known.Keys -join ', ')) -ForegroundColor Red
     exit 2
 }
 
@@ -135,7 +155,7 @@ Write-Host ""
 
 $installed = 0; $present = 0; $failed = 0; $reboot = $false
 foreach ($key in $Apps) {
-    $app = $catalog[$key]
+    $app = $known[$key]
     Write-Host ("[{0}] {1}" -f $key, $app.Name) -ForegroundColor Cyan
 
     $have = Get-Installed $app.Match
