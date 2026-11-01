@@ -14,5 +14,9 @@
   "SkipUpdateSearch": false,
   "AppsOfNote": [
     "Example Line-of-Business App"
+  ],
+  "Apps": [
+    "chrome",
+    "firefox"
   ]
 }
