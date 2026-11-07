@@ -11,6 +11,7 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 | `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11), plus companion data files (`<script>.*.json`, e.g. `install-apps.catalog.json`) |
 | `bin/win-run` | Mac/Linux runner: upload a script (+ optional config) over SSH, run it, return its exit code, clean up |
 | `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists) |
+| `usb/` | The flash-drive kit launcher (`discovery.cmd`) for a first visit, before a machine has SSH; see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
 | `config/example.json` | Every config key any script understands, with placeholder values |
 | `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`); companion JSON files ASCII-only + valid JSON |
 
@@ -25,7 +26,8 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 | [`new-local-user.ps1`](scripts/new-local-user.ps1) | **Yes** | Creates a local account the way Settings > Accounts does: password never expires (`-PasswordExpires` to let it), member of Users, or with `-Admin` of Administrators (groups found by SID, so any display language), and clears the "password not required" flag that both Settings and `New-LocalUser` set. The password comes from `-PasswordFile` (first line; the file is deleted after reading) or a prompt at the machine, never the command line, and never reaches the transcript. An existing account keeps its password (unless `-ResetPassword`) and only gains missing membership; an administrator is never demoted (exit 1). Ends with `RESULT created= passwordset= admin= groups=`. |
 | [`set-ucpd.ps1`](scripts/set-ucpd.ps1) | **Yes** | Shows (no switch), disables (`-Disable`) or re-enables (`-Enable`) the User Choice Protection Driver (UCPD), which blocks every program except Settings, profile-migration tools included, from changing the `.pdf .htm .html http https` default-app keys. Sets the driver's start type and the scheduled task that turns it back on; takes effect after a restart, which it never does itself. Ends with `RESULT present= start= task= running= reboot=`. |
 | [`repair-restored-profile.ps1`](scripts/repair-restored-profile.ps1) | **Yes** | Checks (`-CheckOnly`, exit 1 on any problem) and repairs a user profile restored from another computer (e.g. ForensiT Transwiz) before the user's first sign-in. It unloads registry files the tool left loaded (temporary-profile error); rewrites the old computer's account SID to the user's in every registry key that still belongs to it (settings that won't save); clears migrated file and URL associations (flashing icons, defaults that won't stick); and renames `AppData\Local\Packages` if apps lack their per-app permissions, so Windows rebuilds it. The old SID is detected automatically; hive files, associations and Packages are kept as backups. Clears **all** associations, so only for a freshly restored profile. Needs UCPD stopped (`set-ucpd`) for 5 association keys. Ends with `RESULT unloaded= brokenkeys= fixedkeys= associations= assocfailed= packagesbad= packagesrenamed=`. |
-| [`get-inventory.ps1`](scripts/get-inventory.ps1) | No | Configuration inventory as JSON: hardware (serial, CPU, RAM modules, disks), OS build, volumes, AD/Entra join, NICs and their power-saving state, BitLocker, AV/Defender/firewall, Windows Update (history, pending, policy), local users/admins/profiles, installed apps, remote-access services, power settings. Over SSH it prints JSON to stdout and writes nothing to disk. `-SkipUpdateSearch` skips the online pending-update search. |
+| [`get-inventory.ps1`](scripts/get-inventory.ps1) | No | Configuration inventory as JSON: hardware (serial, CPU, RAM modules, disks), OS build, volumes, AD/Entra join, NICs and their power-saving state, BitLocker, AV/Defender/firewall, Windows Update (history, pending, policy), local users/admins/profiles, installed apps, remote-access services, power settings, Windows activation, printers, shared folders, saved Wi-Fi network names (never keys), listening TCP ports, and what starts automatically (Run keys of the machine and loaded users, startup folders, non-Microsoft scheduled tasks). Configuration only, so it can be committed and diffed; point-in-time health is `get-health`. Over SSH it prints JSON to stdout and writes nothing to disk. `-SkipUpdateSearch` skips the online pending-update search. |
+| [`get-health.ps1`](scripts/get-health.ps1) | No | Health snapshot as JSON with **findings** ranked critical / warning / info: hardware errors (WHEA) by component and month over the whole retained System log (corrected memory errors = a failing DIMM), unexpected shutdowns, blue screens, disk and controller errors, application crashes and hangs, top errors and Defender detections in the last `-Days` (default 90), memory and commit use, CPU load, top processes, disk health and Windows reliability counters, SMART through `smartctl.exe` when found (`-SmartctlPath`, else `tools\smartctl.exe` next to the script, else a smartmontools install), free space, pending reboot, uptime, stability index, WMI repository consistency. At the machine it prints the findings. |
 | [`get-app-usage.ps1`](scripts/get-app-usage.ps1) | No | When each installed application was last run, and by whom, as JSON: for retiring or rebuilding a machine. Reads Prefetch (any program, run count and last 8 runs), each user's UserAssist (programs a person started; a signed-out user's `NTUSER.DAT` is read from a temporary copy, never loaded in place) and BAM, plus services running from an app's folder. Maps them to the uninstall entries (hidden ones included) by install folder and keeps the raw `executions` list for apps that record none. Self-updating apps show prefetch runs nobody made, so `userAssist` is the "a person started it" signal. Changes nothing. |
 | [`netdrop-diag.ps1`](scripts/netdrop-diag.ps1) | No | Network-loss evidence collector (adapters, power management, sleep/wake, connectivity, event logs) into a zip. Run while the failure is live, before rebooting. |
 
@@ -115,6 +117,40 @@ Notes on the data:
 - "Allow the computer to turn off this device" is read from two sources, `Get-NetAdapterPowerManagement` and `MSPower_DeviceEnable`. They can disagree (seen on Win11 26H2), and the renderer flags it when they do.
 - USB Ethernet adapters report `Unsupported` from `Get-NetAdapterPowerManagement` and have no `MSPower_DeviceEnable` instance; that is treated as "no value", not a disagreement.
 - BIOS placeholder strings ("Default string", "To be filled by O.E.M.") stay in the JSON but are hidden in the rendered table.
+
+## Health
+
+```bash
+win-run pc01 get-health > pc01-health.json
+python3 -c 'import json,sys; [print(f["severity"], f["message"]) for f in json.load(open(sys.argv[1]))["findings"]]' pc01-health.json
+```
+
+A snapshot, not a record to diff: processes, memory and event counts change every run. Keep it where the finding is written up, or not at all. Notes:
+- The hardware-error history only goes back as far as the System log does (`eventLogCoverage`); on a busy machine that can be weeks. Firmware keeps its own log (Dell: the RMT event log in BIOS setup), which can hold errors Windows never logged.
+- `UNEXPECTED_SHUTDOWNS` counts Kernel-Power 41 in the window, including any shutdown the operator caused by unplugging the machine; check the dates.
+- Windows' reliability counters are often all zero or empty on SATA drives behind Intel RST (`busType` `RAID`); only smartctl gives real SMART data there.
+
+## Discovery from a flash drive
+
+For a first visit, before a machine has SSH (and to leave nothing behind on it): one launcher runs `get-inventory`, `get-health` and `get-app-usage` from the stick and writes their JSON back to it. Read-only on the machine.
+
+Prepare the stick (root of the drive, or any folder):
+
+```
+discovery.cmd          <- usb/discovery.cmd
+get-inventory.ps1      <- scripts/
+get-health.ps1         <- scripts/
+get-app-usage.ps1      <- scripts/
+tools/smartctl.exe     <- optional: smartmontools' smartctl.exe (+ any DLLs next to it), for real SMART data
+```
+
+Copy the `.ps1` files from a release tag (`git archive v1.N scripts | tar -x`), not an unreleased `main`. smartctl.exe comes from the smartmontools Windows build (smartmontools.org); the installer's `bin\smartctl.exe` is enough, it needs no install on the target. It is GPL; don't commit it here.
+
+On each machine: right-click `discovery.cmd`, **Run as administrator**, wait 1-3 minutes. Output lands in `output\<COMPUTERNAME>_<timestamp>\` on the stick (`get-inventory.json`, `get-health.json`, `get-app-usage.json`), and the health findings are printed. When it says "Safe to eject", move on.
+
+At home: render the inventory with `win-inventory-render` and commit it in the client repo like any SSH collection; read the health findings and app usage into the write-up.
+
+If the antivirus blocks a script ("This script contains malicious content and has been blocked by your antivirus software"): that is AMSI, which `-ExecutionPolicy Bypass` does not get around. Seen with Bitdefender on `enable-ssh-admin.ps1` (a heuristic, `CMD:Heur...`). Add an exception for that one file in the AV and run again; for smartctl.exe (raw disk access sometimes trips "riskware" heuristics), an exception for `tools\smartctl.exe`. If Group Policy enforces an execution policy (`Get-ExecutionPolicy -List` shows MachinePolicy/UserPolicy), `-ExecutionPolicy Bypass` is ignored; that needs a policy exception from whoever runs the GPO.
 
 ## Client repos
 

@@ -18,5 +18,7 @@
   "Apps": [
     "chrome",
     "firefox"
-  ]
+  ],
+  "HealthDays": 90,
+  "SmartctlPath": "C:\\tools\\smartctl.exe"
 }

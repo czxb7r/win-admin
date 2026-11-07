@@ -187,7 +187,8 @@ $script:errors = New-Object System.Collections.Generic.List[string]
 function Section([string]$Name, [scriptblock]$Body) {
     try { & $Body } catch { $script:errors.Add("${Name}: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))") }
 }
-function S($v) { if ($null -ne $v) { "$v".Trim() } }
+# Explicit $null: a function that outputs nothing serializes as {} inside a hashtable.
+function S($v) { if ($null -ne $v) { "$v".Trim() } else { $null } }
 function ConvertFrom-FileTime([long]$ft) {
     if ($ft -le 0) { return $null }
     try {

@@ -7,7 +7,14 @@
     version, build, install date), volumes, directory join (AD / Entra), network
     adapters, BitLocker, AV / Defender / firewall, Windows Update (reboot pending,
     recent history, pending updates, policy), local users / admins / profiles,
-    installed applications, remote-access services and power settings.
+    installed applications, remote-access services and power settings. Also
+    Windows activation, printers, shared folders, saved Wi-Fi network names
+    (never keys), listening TCP ports and what starts automatically (Run keys,
+    startup folders, non-Microsoft scheduled tasks).
+
+    Configuration only, so the JSON stays stable between runs and can be
+    committed and diffed; point-in-time health (event history, disks, memory
+    pressure) is get-health.
 
     Each collector is independent: a failure is recorded in the "errors" array
     and the rest still runs. Changes nothing on the machine.
@@ -94,7 +101,8 @@ function Section([string]$Name, [scriptblock]$Body) {
 }
 function D($d) { if ($d) { ([datetime]$d).ToString('yyyy-MM-ddTHH:mm:ss') } }
 function GB($bytes, [int]$digits = 1) { if ($null -ne $bytes) { [math]::Round([double]$bytes / 1GB, $digits) } }
-function S($v) { if ($null -ne $v) { "$v".Trim() } }
+# Explicit $null: a function that outputs nothing serializes as {} inside a hashtable.
+function S($v) { if ($null -ne $v) { "$v".Trim() } else { $null } }
 function Get-PowercfgAc([string]$Sub, [string]$Setting) {
     $line = powercfg /query SCHEME_CURRENT $Sub $Setting | Select-String 'Current AC Power Setting Index' | Select-Object -First 1
     if ($line -and "$line" -match '0x([0-9a-fA-F]+)') { [Convert]::ToInt32($matches[1], 16) }
@@ -179,6 +187,16 @@ $inv.os = Section 'os' {
     }
 }
 
+# SoftwareLicensingProduct is slow (seconds); kept to the one Windows product.
+Section 'activation' {
+    $lp = Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" | Select-Object -First 1
+    $names = @{ 0 = 'Unlicensed'; 1 = 'Licensed'; 2 = 'OOBGrace'; 3 = 'OOTGrace'; 4 = 'NonGenuineGrace'; 5 = 'Notification'; 6 = 'ExtendedGrace' }
+    if ($inv.os -and $lp) {
+        $inv.os.activation = $names[[int]$lp.LicenseStatus]
+        $inv.os.licenseChannel = S $lp.ProductKeyChannel
+    }
+}
+
 $inv.volumes = @(Section 'volumes' {
     Get-Volume | Where-Object { $_.DriveLetter } | Sort-Object DriveLetter | ForEach-Object {
         [ordered]@{
@@ -229,6 +247,7 @@ $inv.network = @(Section 'network' {
             status            = S $a.Status
             linkSpeed         = S $a.LinkSpeed
             ipv4              = @($ip | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+            gateway           = @(Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { S $_.NextHop })
             dhcp              = $(if ($ipif) { "$($ipif.Dhcp)" -eq 'Enabled' })
             dnsServers        = @($dns.ServerAddresses)
             driverVersion     = S $a.DriverVersion
@@ -412,6 +431,80 @@ $inv.power = Section 'power' {
         hibernateAcSecs = Get-PowercfgAc 'SUB_SLEEP' 'HIBERNATEIDLE'
     }
 }
+
+$inv.printers = @(Section 'printers' {
+    $default = (Get-CimInstance Win32_Printer -Filter 'Default=TRUE' -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+    Get-Printer | Sort-Object Name | ForEach-Object {
+        [ordered]@{ name = S $_.Name; driver = S $_.DriverName; port = S $_.PortName; shared = [bool]$_.Shared; type = S $_.Type; default = ($_.Name -eq $default) }
+    }
+})
+
+$inv.shares = @(Section 'shares' {
+    Get-SmbShare | Where-Object { $_.Name -notmatch '\$$' } | Sort-Object Name | ForEach-Object {
+        [ordered]@{ name = S $_.Name; path = S $_.Path; description = S $_.Description }
+    }
+})
+
+# Network names only; never the keys.
+$inv.wifiProfiles = @(Section 'wifiProfiles' {
+    if (Get-Service WlanSvc -ErrorAction SilentlyContinue) {
+        $ErrorActionPreference = 'Continue'
+        netsh.exe wlan show profiles 2>$null | Select-String 'All User Profile\s*:\s*(.+)$' | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Sort-Object
+    }
+})
+
+$inv.listeningPorts = @(Section 'listeningPorts' {
+    $procs = @{}; Get-Process | ForEach-Object { $procs[$_.Id] = $_.ProcessName }
+    Get-NetTCPConnection -State Listen | Sort-Object LocalPort, LocalAddress -Unique | ForEach-Object {
+        [ordered]@{ address = S $_.LocalAddress; port = $_.LocalPort; process = $procs[[int]$_.OwningProcess] }
+    }
+})
+
+$inv.startup = [ordered]@{}
+$inv.startup.runKeys = @(Section 'runKeys' {
+    $keys = @(
+        @{ scope = 'machine'; path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' },
+        @{ scope = 'machine'; path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' },
+        @{ scope = 'machine'; path = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run' },
+        @{ scope = 'machine'; path = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce' }
+    )
+    # Users whose registry is loaded (signed in, or the SSH account itself).
+    foreach ($u in @(Get-ChildItem 'Registry::HKEY_USERS' | Where-Object { $_.PSChildName -match '^S-1-5-21-[\d-]+$' })) {
+        $name = $u.PSChildName
+        try { $name = (New-Object Security.Principal.SecurityIdentifier $u.PSChildName).Translate([Security.Principal.NTAccount]).Value } catch {}
+        foreach ($leaf in 'Run', 'RunOnce') { $keys += @{ scope = $name; path = "Registry::HKEY_USERS\$($u.PSChildName)\Software\Microsoft\Windows\CurrentVersion\$leaf" } }
+    }
+    foreach ($k in $keys) {
+        $item = Get-Item -LiteralPath $k.path -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        foreach ($vn in $item.GetValueNames()) {
+            if (-not $vn) { continue }
+            [ordered]@{ scope = $k.scope; key = ($k.path -replace '^Registry::', '' -replace '^HKLM:', 'HKLM'); name = S $vn; command = S $item.GetValue($vn) }
+        }
+    }
+})
+$inv.startup.startupFolders = @(Section 'startupFolders' {
+    $dirs = @(@{ scope = 'machine'; path = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp" })
+    Get-CimInstance Win32_UserProfile -Filter 'Special=False' | ForEach-Object {
+        $dirs += @{ scope = (Split-Path $_.LocalPath -Leaf); path = (Join-Path $_.LocalPath 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup') }
+    }
+    foreach ($d in $dirs) {
+        if (Test-Path -LiteralPath $d.path) {
+            Get-ChildItem -LiteralPath $d.path -File -Force | Where-Object { $_.Name -ne 'desktop.ini' } | ForEach-Object { [ordered]@{ scope = $d.scope; name = S $_.Name } }
+        }
+    }
+})
+$inv.startup.scheduledTasks = @(Section 'scheduledTasks' {
+    Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' -and $_.TaskPath -notlike '\Microsoft\*' } | Sort-Object TaskPath, TaskName | ForEach-Object {
+        [ordered]@{
+            name    = S $_.TaskName
+            path    = S $_.TaskPath
+            state   = S $_.State
+            runAs   = S $_.Principal.UserId
+            command = S (@($_.Actions | ForEach-Object { (@($_.Execute, $_.Arguments) | Where-Object { $_ }) -join ' ' }) -join '; ')
+        }
+    }
+})
 
 $inv.errors = @($script:errors)
 

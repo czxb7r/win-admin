@@ -11,6 +11,8 @@ if [[ $# -eq 0 ]]; then
         tools/check-ascii "$j" || rc=1
         python3 -m json.tool "$j" >/dev/null || { echo "check: invalid JSON: $j" >&2; rc=1; }
     done
+    # USB kit launchers: ASCII only (cmd.exe reads them in the OEM code page).
+    tools/check-ascii usb/*.cmd || rc=1
 fi
 tools/check-ascii "$@" || rc=1
 if command -v pwsh >/dev/null; then
