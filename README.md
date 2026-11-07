@@ -11,6 +11,7 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 | `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11), plus companion data files (`<script>.*.json`, e.g. `install-apps.catalog.json`) |
 | `bin/win-run` | Mac/Linux runner: upload a script (+ optional config) over SSH, run it, return its exit code, clean up |
 | `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists). Shares flag a **whole drive** shared; listening ports leave out Windows' own (RPC, SMB, NetBIOS, dynamic RPC); files from before a field existed show "not collected" |
+| `bin/win-usb-kit` | Mac: build the discovery flash drive (pick the drive from a list; it does the rest), see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
 | `usb/` | The flash-drive kit launcher (`discovery.cmd`) for a first visit, before a machine has SSH; see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
 | `config/example.json` | Every config key any script understands, with placeholder values |
 | `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`); companion JSON files ASCII-only + valid JSON |
@@ -134,17 +135,28 @@ A snapshot, not a record to diff: processes, memory and event counts change ever
 
 For a first visit, before a machine has SSH (and to leave nothing behind on it): one launcher runs `get-inventory`, `get-health` and `get-app-usage` from the stick and writes their JSON back to it. Read-only on the machine.
 
-Prepare the stick (root of the drive, or any folder):
+Build the stick on the Mac with one command, then pick the drive when asked:
 
-```
-discovery.cmd          <- usb/discovery.cmd
-get-inventory.ps1      <- scripts/
-get-health.ps1         <- scripts/
-get-app-usage.ps1      <- scripts/
-tools/smartctl.exe     <- optional: smartmontools' smartctl.exe (+ any DLLs next to it), for real SMART data
+```bash
+~/src/win-admin/bin/win-usb-kit
 ```
 
-Copy the `.ps1` files from a release tag (`git archive v1.N scripts | tar -x`), not an unreleased `main`. smartctl.exe comes from the smartmontools Windows build (smartmontools.org); the installer's `bin\smartctl.exe` is enough, it needs no install on the target. It is GPL; don't commit it here.
+It:
+1. Lists external **FAT32/exFAT** drives only (backup disks and anything Windows can't read are listed as "not offered") and waits for one to be plugged in if there is none. `--volume /Volumes/<name>` picks one directly; for a drive that isn't FAT32/exFAT it offers to erase the whole drive as exFAT, after you type the volume's name.
+2. Copies `usb/discovery.cmd` and the three collectors from the **newest release tag** (`git fetch`, then `git archive`; `--tag` for another), with CRLF line endings for the launcher.
+3. Gets `tools/smartctl.exe`: the latest smartmontools Windows installer from its GitHub release, GPG signature checked against the fingerprints pinned in the script (`SMT_KEYS`, from smartmontools.org's Download page), 64-bit `smartctl.exe` extracted with 7-Zip, cached in `~/Library/Caches/win-admin/smartmontools/<version>/`. 7-Zip and GnuPG are installed with Homebrew if missing. If any of that fails (no network, a release signed with a new key, no Homebrew), it says why and asks you to drag in an installer or `smartctl.exe` you downloaded yourself (an `.asc` next to an installer is checked); Enter skips smartctl. `--smartctl FILE` supplies one up front, `--no-smartctl` builds without it.
+4. Writes everything to the root of the drive, plus `KIT-VERSION.txt` (release, commit, smartctl source, build date). An existing `output\` folder is never touched, so a stick with collected data can be rebuilt.
+5. Checks every file on the drive against its source (SHA-256), removes macOS `._` files, and ejects.
+
+The resulting drive:
+
+```
+discovery.cmd  get-inventory.ps1  get-health.ps1  get-app-usage.ps1  KIT-VERSION.txt
+tools\smartctl.exe   (unless skipped)
+output\              (created by the first collection)
+```
+
+When a smartmontools release is signed with a new key, `win-usb-kit` names the key; check its fingerprint on smartmontools.org's Download page and add it to `SMT_KEYS`. smartmontools is GPL; the binary is never committed here.
 
 On each machine: right-click `discovery.cmd`, **Run as administrator**, wait 1-3 minutes. Output lands in `output\<COMPUTERNAME>_<timestamp>\` on the stick (`get-inventory.json`, `get-health.json`, `get-app-usage.json`), and the health findings are printed. When it says "Safe to eject", move on.
 

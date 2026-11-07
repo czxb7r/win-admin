@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# win-usb-kit -- build the discovery flash drive (usb/discovery.cmd + collectors) on macOS.
+set -euo pipefail
+
+WIN_ADMIN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CACHE="${XDG_CACHE_HOME:-$HOME/Library/Caches}/win-admin/smartmontools"
+KIT_FILES=(usb/discovery.cmd scripts/get-inventory.ps1 scripts/get-health.ps1 scripts/get-app-usage.ps1)
+SMT_REPO="${WIN_USB_KIT_SMT_REPO:-smartmontools/smartmontools}"   # override only for testing the fallback
+# smartmontools release signing keys, full fingerprints, as published on
+# https://www.smartmontools.org/wiki/Download ("Release files are signed with ...").
+# A new release signed with a new key fails verification until its fingerprint,
+# checked on that page, is added here; until then the script asks for the file.
+SMT_KEYS=(
+    0C9577FD2C4CFCB4B9A599640A30812EFF3AEFF5   # "Smartmontools Signing Key (through 2025)", signs 7.5
+)
+
+usage() {
+    cat <<'EOF'
+Usage: win-usb-kit [options]
+
+Builds the discovery flash drive: copies usb/discovery.cmd and the collectors
+(get-inventory, get-health, get-app-usage) from the latest win-admin release
+tag onto the drive, adds tools/smartctl.exe (latest smartmontools, signature
+verified), writes KIT-VERSION.txt, and ejects the drive. An existing output/
+folder on the drive (collected data) is never touched.
+
+Run it, plug in the drive when asked, pick it from the list. That's all.
+
+Options:
+  --volume PATH     Use this mounted volume (skips the picker; any writable FAT/exFAT volume).
+  --tag TAG         win-admin release tag to copy (default: newest v* tag after git fetch).
+  --smartctl FILE   Use this smartctl.exe or smartmontools-*.win32-setup.exe instead of downloading.
+  --no-smartctl     Build the kit without smartctl.exe.
+  --no-eject        Leave the drive mounted at the end.
+  -h, --help        This help.
+
+Needs: macOS, git, curl; 7-Zip and GnuPG for smartctl (installed with Homebrew
+if missing). If the smartctl download or its verification fails, it asks for a
+file you downloaded yourself (Enter skips smartctl).
+EOF
+}
+
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '  \033[32mOK\033[0m   %s\n' "$*"; }
+warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
+die()  { printf '\033[31mwin-usb-kit: %s\033[0m\n' "$*" >&2; exit 1; }
+
+VOLUME="" TAG="" SMARTCTL_ARG="" NO_SMART=0 NO_EJECT=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --volume) VOLUME="${2:?}"; shift 2 ;;
+        --tag) TAG="${2:?}"; shift 2 ;;
+        --smartctl) SMARTCTL_ARG="${2:?}"; shift 2 ;;
+        --no-smartctl) NO_SMART=1; shift ;;
+        --no-eject) NO_EJECT=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+
+[[ "$(uname)" == Darwin ]] || die "macOS only (uses diskutil)."
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+pl() { plutil -extract "$2" raw -o - - <<<"$1" 2>/dev/null || true; }   # pl <plist> <key>
+
+# ---- 1. the drive -----------------------------------------------------------
+volume_line() {   # one-line description of a mounted volume
+    local v="$1" info fs size free
+    info="$(diskutil info -plist "$v" 2>/dev/null)" || return 1
+    fs="$(pl "$info" FilesystemName)"
+    read -r size free < <(df -k "$v" | awk 'NR==2 { printf "%.1f %.1f\n", $2/1048576, $4/1048576 }')
+    printf '%s  (%s, %s GB, %s GB free)' "$(basename "$v")" "${fs:-?}" "$size" "$free"
+}
+
+# Only external, writable FAT32/exFAT volumes are offered: never a backup disk or
+# anything Windows can't read. Other external volumes are listed, not offered.
+pick_volume() {
+    local -a cands=() others=()
+    local v info fs
+    for v in /Volumes/*; do
+        [[ -d "$v" ]] || continue
+        info="$(diskutil info -plist "$v" 2>/dev/null)" || continue
+        [[ "$(pl "$info" Internal)" == false ]] || continue
+        [[ "$(pl "$info" BusProtocol)" != "Disk Image" ]] || continue
+        fs="$(pl "$info" FilesystemType)"
+        if [[ ( "$fs" == msdos || "$fs" == exfat ) && "$(pl "$info" WritableVolume)" == true ]]; then cands+=("$v"); else others+=("$v"); fi
+    done
+    if [[ ${#others[@]} -gt 0 && -z "${OTHERS_SHOWN:-}" ]]; then
+        OTHERS_SHOWN=1
+        say "Not offered (not a writable FAT32/exFAT drive, so Windows or this Mac can't use it as is):"
+        for v in "${others[@]}"; do say "     $(volume_line "$v")"; done
+        say "  (To erase one of those as exFAT for the kit: win-usb-kit --volume /Volumes/<name>)"
+    fi
+    if [[ ${#cands[@]} -eq 0 ]]; then
+        say "Plug in the flash drive (waiting; Ctrl-C to stop)..."
+        local before; before="$(ls /Volumes)"
+        while [[ "$(ls /Volumes)" == "$before" ]]; do sleep 1; done
+        sleep 2
+        pick_volume; return
+    fi
+    say "Flash drives:"
+    local i
+    for i in "${!cands[@]}"; do printf '  %d) %s\n' $((i + 1)) "$(volume_line "${cands[$i]}")"; done
+    local n
+    while true; do
+        read -r -p "Which one is the discovery drive? [1-${#cands[@]}] " n || die "no answer; stopped."
+        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#cands[@]} )) && break
+    done
+    VOLUME="${cands[$((n - 1))]}"
+}
+
+[[ -n "$VOLUME" ]] || pick_volume
+[[ -d "$VOLUME" ]] || die "not a mounted volume: $VOLUME"
+INFO="$(diskutil info -plist "$VOLUME")" || die "diskutil can't read $VOLUME"
+FSTYPE="$(pl "$INFO" FilesystemType)"
+if [[ "$FSTYPE" != msdos && "$FSTYPE" != exfat ]]; then
+    # Windows can't read APFS/HFS+, and macOS can't write NTFS. Offer to erase the whole drive as exFAT.
+    # The physical whole disk: for APFS, ParentWholeDisk is the synthesized container,
+    # so go through the container's physical store.
+    WHOLE="$(pl "$INFO" ParentWholeDisk)"
+    STORE="$(pl "$INFO" APFSPhysicalStores.0.APFSPhysicalStore)"
+    [[ -z "$STORE" ]] || WHOLE="$(pl "$(diskutil info -plist "$STORE")" ParentWholeDisk)"
+    [[ -n "$WHOLE" ]] || die "can't tell which physical disk $VOLUME is on."
+    NAME="$(basename "$VOLUME")"
+    [[ "$(pl "$INFO" Internal)" == false ]] || die "$VOLUME is an internal disk; not touching it."
+    warn "$(volume_line "$VOLUME") is $(pl "$INFO" FilesystemName): Windows can't use it (needs FAT32 or exFAT)."
+    say  "  Erasing /dev/$WHOLE as exFAT deletes EVERYTHING on that drive:"
+    diskutil list "/dev/$WHOLE" | sed 's/^/    /'
+    read -r -p "  Type the volume's name ($NAME) to erase the whole drive, anything else to stop: " a || a=""
+    [[ "$a" == "$NAME" ]] || die "stopped; nothing changed."
+    diskutil eraseDisk ExFAT DISCOVERY MBR "/dev/$WHOLE" >"$TMP/erase.log" 2>&1 || { cat "$TMP/erase.log" >&2; die "erasing /dev/$WHOLE failed."; }
+    VOLUME="/Volumes/DISCOVERY"; sleep 2
+    [[ -d "$VOLUME" ]] || die "erased, but $VOLUME didn't mount."
+    INFO="$(diskutil info -plist "$VOLUME")"
+fi
+[[ "$(pl "$INFO" WritableVolume)" == true ]] || die "$VOLUME is read-only."
+ok "drive: $(volume_line "$VOLUME")"
+
+# ---- 2. the kit from the release tag ---------------------------------------
+cd "$WIN_ADMIN"
+git fetch -q --tags origin 2>/dev/null || warn "git fetch failed; using the tags already here."
+[[ -n "$TAG" ]] || TAG="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+[[ -n "$TAG" ]] || die "no v* release tag in $WIN_ADMIN."
+git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "no tag $TAG."
+mkdir -p "$TMP/kit"
+git archive "$TAG" "${KIT_FILES[@]}" | tar -x -C "$TMP/kit" || die "$TAG doesn't have all of: ${KIT_FILES[*]}"
+CMD="$TMP/kit/usb/discovery.cmd"
+# cmd.exe wants CRLF; git archive normally applies .gitattributes, but make sure.
+if ! LC_ALL=C grep -q $'\r$' "$CMD"; then perl -pi -e 's/\r?\n/\r\n/' "$CMD"; fi
+ok "kit: win-admin $TAG ($(git rev-list -n1 --abbrev-commit "$TAG"))"
+
+# ---- 3. smartctl ------------------------------------------------------------
+need_brew() {   # need_brew <command> <formula>
+    command -v "$1" >/dev/null && return 0
+    command -v brew >/dev/null || { warn "$1 not found and no Homebrew to install $2."; return 1; }
+    say "  Installing $2 with Homebrew (needed to verify/extract smartctl)..."
+    brew install -q "$2" >/dev/null 2>&1 && command -v "$1" >/dev/null
+}
+sevenzip() { if command -v 7zz >/dev/null; then 7zz "$@"; else 7z "$@"; fi; }
+have_7z() { command -v 7zz >/dev/null || command -v 7z >/dev/null || need_brew 7zz sevenzip; }
+
+is_smartctl() { [[ -f "$1" ]] && [[ "$(head -c2 "$1")" == MZ ]] && LC_ALL=C grep -aq 'smartctl' "$1"; }
+
+# extract_installer <installer.exe> <out smartctl.exe>: the 64-bit build (bin/), else 32-bit (bin32/).
+extract_installer() {
+    have_7z || return 1
+    local d="$TMP/x"; rm -rf "$d"; mkdir -p "$d"
+    sevenzip x -y -o"$d" "$1" 'bin/smartctl.exe' 'bin32/smartctl.exe' >/dev/null 2>&1 || true
+    local f
+    for f in "$d/bin/smartctl.exe" "$d/bin32/smartctl.exe"; do
+        if is_smartctl "$f"; then cp "$f" "$2"; return 0; fi
+    done
+    return 1
+}
+
+# verify_sig <file> <file.asc>: valid signature by one of SMT_KEYS (key expiry after signing is fine).
+verify_sig() {
+    need_brew gpg gnupg || return 1
+    local g="$TMP/gpg" fpr st
+    rm -rf "$g"; mkdir -m 700 "$g"
+    for fpr in "${SMT_KEYS[@]}"; do
+        curl -sfL "https://keys.openpgp.org/vks/v1/by-fingerprint/$fpr" -o "$TMP/k.asc" && grep -q 'BEGIN PGP' "$TMP/k.asc" ||
+            curl -sfL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$fpr" -o "$TMP/k.asc" || continue
+        gpg --homedir "$g" --batch --quiet --import "$TMP/k.asc" >/dev/null 2>&1 || true
+    done
+    st="$(gpg --homedir "$g" --batch --status-fd 1 --verify "$2" "$1" 2>/dev/null || true)"
+    fpr="$(awk '$2 == "VALIDSIG" { print $NF }' <<<"$st")"
+    if [[ -n "$fpr" ]] && printf '%s\n' "${SMT_KEYS[@]}" | grep -qx "$fpr"; then return 0; fi
+    local signer; signer="$(awk '$2 == "ERRSIG" || $2 == "NO_PUBKEY" { print $3 }' <<<"$st" | head -1)"
+    warn "signature not verified${signer:+ (signed by key $signer, not one of the pinned keys: check it on https://www.smartmontools.org/wiki/Download and add it to SMT_KEYS)}."
+    return 1
+}
+
+# download_smartctl <out>: latest GitHub release, verified, cached per version.
+download_smartctl() {
+    local out="$1" rel ver url
+    rel="$(curl -sfL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$SMT_REPO/releases/latest")" || {
+        warn "can't reach GitHub for the latest smartmontools release."; return 1; }
+    ver="$(plutil -extract tag_name raw -o - - <<<"$rel" 2>/dev/null | sed 's/^RELEASE_//; s/_/./g')"
+    url="$(grep -o '"browser_download_url": *"[^"]*win32-setup\.exe"' <<<"$rel" | head -1 | sed 's/.*"\(https[^"]*\)"/\1/')"
+    [[ -n "$ver" && -n "$url" ]] || { warn "no Windows installer in the latest smartmontools release."; return 1; }
+    if [[ -f "$CACHE/$ver/smartctl.exe" ]]; then
+        cp "$CACHE/$ver/smartctl.exe" "$out"; SMART_NOTE="smartmontools $ver (cached, verified $(cat "$CACHE/$ver/verified" 2>/dev/null))"; return 0
+    fi
+    say "  Downloading smartmontools $ver..."
+    curl -sfL "$url" -o "$TMP/setup.exe" && curl -sfL "$url.asc" -o "$TMP/setup.exe.asc" || { warn "download failed: $url"; return 1; }
+    verify_sig "$TMP/setup.exe" "$TMP/setup.exe.asc" || return 1
+    extract_installer "$TMP/setup.exe" "$out" || { warn "couldn't extract smartctl.exe from the installer."; return 1; }
+    mkdir -p "$CACHE/$ver"; cp "$out" "$CACHE/$ver/smartctl.exe"; date +%F > "$CACHE/$ver/verified"
+    SMART_NOTE="smartmontools $ver (downloaded $(basename "$url"), signature verified)"
+}
+
+# from_file <path> <out>: a smartctl.exe, or an installer to extract it from.
+from_file() {
+    local f="${1/#\~/$HOME}"
+    f="${f%\"}"; f="${f#\"}"; f="${f%\'}"; f="${f#\'}"; f="${f//\\ / }"   # Finder drag-and-drop quoting
+    [[ -f "$f" ]] || { warn "no such file: $f"; return 1; }
+    if [[ "$(basename "$f" | tr A-Z a-z)" == smartctl.exe ]] && is_smartctl "$f"; then
+        cp "$f" "$2"; SMART_NOTE="smartctl.exe supplied by the operator ($(basename "$f"))"; return 0
+    fi
+    if [[ -f "$f.asc" ]]; then verify_sig "$f" "$f.asc" || return 1; fi
+    extract_installer "$f" "$2" || { warn "$f is neither smartctl.exe nor a smartmontools installer."; return 1; }
+    SMART_NOTE="smartmontools from $(basename "$f")$([[ -f "$f.asc" ]] && echo ', signature verified' || echo ', supplied by the operator')"
+}
+
+SMART_NOTE="none"
+SMARTCTL="$TMP/smartctl.exe"
+if [[ $NO_SMART -eq 1 ]]; then
+    SMARTCTL=""
+elif [[ -n "$SMARTCTL_ARG" ]]; then
+    from_file "$SMARTCTL_ARG" "$SMARTCTL" || die "can't use $SMARTCTL_ARG"
+elif ! download_smartctl "$SMARTCTL"; then
+    say ""
+    say "  Get it by hand: https://github.com/$SMT_REPO/releases/latest (smartmontools-*.win32-setup.exe;"
+    say "  the .asc next to it is checked if present), or https://www.smartmontools.org/wiki/Download."
+    while true; do
+        read -r -p "  Drag the installer or smartctl.exe here and press Enter (just Enter to skip smartctl): " p || p=""
+        if [[ -z "$p" ]]; then SMARTCTL=""; SMART_NOTE="none (skipped)"; break; fi
+        from_file "$p" "$SMARTCTL" && break
+    done
+fi
+KEEP_OLD=0
+if [[ -n "$SMARTCTL" ]]; then
+    ok "smartctl: $SMART_NOTE"
+elif [[ $NO_SMART -eq 0 && -f "$VOLUME/tools/smartctl.exe" ]]; then
+    KEEP_OLD=1; SMART_NOTE="kept the tools/smartctl.exe already on the drive (from an earlier build)"
+    warn "smartctl skipped; keeping the copy already on the drive."
+else
+    warn "no smartctl.exe; get-health uses Windows' disk counters only."
+fi
+
+# ---- 4. write the drive -----------------------------------------------------
+say "Writing to $VOLUME ..."
+cp "$CMD" "$VOLUME/discovery.cmd"
+for f in get-inventory get-health get-app-usage; do cp "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+if [[ -n "$SMARTCTL" ]]; then mkdir -p "$VOLUME/tools"; cp "$SMARTCTL" "$VOLUME/tools/smartctl.exe"
+elif [[ $KEEP_OLD -eq 0 ]]; then rm -f "$VOLUME/tools/smartctl.exe"; rmdir "$VOLUME/tools" 2>/dev/null || true; fi
+{
+    printf 'win-admin discovery kit\r\n'
+    printf 'win-admin: %s (%s)\r\n' "$TAG" "$(git rev-list -n1 "$TAG")"
+    printf 'smartctl:  %s\r\n' "$SMART_NOTE"
+    printf 'built:     %s on %s\r\n' "$(date '+%F %T %Z')" "$(scutil --get ComputerName 2>/dev/null || hostname)"
+    printf '\r\nOn each computer: right-click discovery.cmd, Run as administrator.\r\n'
+    printf 'Output goes to output\\<COMPUTER>_<time>\\ on this drive.\r\n'
+} > "$VOLUME/KIT-VERSION.txt"
+
+# Verify what landed on the drive.
+bad=0
+check() { [[ "$(shasum -a 256 < "$1")" == "$(shasum -a 256 < "$2")" ]] || { warn "mismatch: $2"; bad=1; }; }
+check "$CMD" "$VOLUME/discovery.cmd"
+for f in get-inventory get-health get-app-usage; do check "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+[[ -z "$SMARTCTL" ]] || check "$SMARTCTL" "$VOLUME/tools/smartctl.exe"
+LC_ALL=C grep -q $'\r$' "$VOLUME/discovery.cmd" || { warn "discovery.cmd lost its CRLF line endings"; bad=1; }
+[[ $bad -eq 0 ]] || die "the drive doesn't match the kit; not ejecting."
+dot_clean -m "$VOLUME" 2>/dev/null || true
+find "$VOLUME" -maxdepth 2 -name '._*' -delete 2>/dev/null || true
+sync
+ok "verified on the drive:"
+( cd "$VOLUME" && ls -l discovery.cmd get-*.ps1 KIT-VERSION.txt tools/smartctl.exe 2>/dev/null | awk '{ printf "         %8s  %s\n", $5, $NF }' ) || true
+[[ -d "$VOLUME/output" ]] && say "         output/ (left as it was: $(find "$VOLUME/output" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') collection(s))"
+
+# ---- 5. eject ---------------------------------------------------------------
+if [[ $NO_EJECT -eq 1 ]]; then
+    say "Done. $VOLUME left mounted."
+elif diskutil eject "$VOLUME" >/dev/null 2>&1; then
+    say "Done. Drive ejected; it's ready. On each PC: right-click discovery.cmd, Run as administrator."
+else
+    warn "couldn't eject $VOLUME (something has it open). Eject it in Finder."
+fi
