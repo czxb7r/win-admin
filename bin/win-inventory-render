@@ -81,7 +81,9 @@ def row_disk(i):
 def row_windows(i):
     o = i.get("os") or {}
     return (f"{o.get('caption')} **{o.get('displayVersion')}**, build {o.get('build')}; "
-            f"installed {date(o.get('installDate'))}; last boot {date(o.get('lastBoot'))}")
+            f"installed {date(o.get('installDate'))}; last boot {date(o.get('lastBoot'))}"
+            + (f"; activation: {o['activation']}" + (f" ({o['licenseChannel']})" if o.get("licenseChannel") else "")
+               if o.get("activation") else ""))
 
 
 def row_join(i):
@@ -107,6 +109,8 @@ def row_network(i):
         if up:
             ips = ", ".join(f"`{a}`" for a in n.get("ipv4") or [])
             s += f" — {n.get('linkSpeed')}, {ips}" + (" (DHCP)" if n.get("dhcp") else " (static)")
+            if n.get("gateway"):
+                s += ", gateway " + ", ".join(f"`{g}`" for g in n["gateway"])
             if n.get("dnsServers"):
                 s += ", DNS " + ", ".join(f"`{d}`" for d in n["dnsServers"])
         else:
@@ -249,6 +253,75 @@ def make_row_apps(note):
     return row_apps
 
 
+NOT_COLLECTED = "not collected (older get-inventory)"
+# Ports every Windows machine listens on: RPC, NetBIOS, SMB, CDP, SSDP/UPnP, and the
+# dynamic RPC range owned by core services.
+WINDOWS_PORTS = {135, 139, 445, 5040, 2869}
+CORE_PROCS = {"lsass", "wininit", "services", "svchost", "spoolsv", "System"}
+
+
+def row_shares(i):
+    if "shares" not in i:
+        return NOT_COLLECTED
+    out = []
+    for sh in i.get("shares") or []:
+        path = sh.get("path") or ""
+        if "," in path and "LocalsplOnly" in path:  # shared printer, shown under Printers
+            continue
+        s = f"`{sh.get('name')}` `{path}`"
+        if re.match(r"^[A-Za-z]:\\?$", path):
+            s += " **(whole drive)**"
+        out.append(s)
+    return "<br>".join(out) or "none"
+
+
+def row_printers(i):
+    if "printers" not in i:
+        return NOT_COLLECTED
+    virtual = re.compile(r"PDF|XPS|OneNote|^Fax$", re.I)
+    ps = [p for p in i.get("printers") or [] if not virtual.search(p.get("name") or "")]
+    out = [f"{p.get('name')}" + (" (default)" if p.get("default") else "") + (" (shared)" if p.get("shared") else "") for p in ps]
+    hidden = len(i.get("printers") or []) - len(ps)
+    return "; ".join(out) + (f" (+{hidden} virtual)" if hidden else "") if out else (f"none (+{hidden} virtual)" if hidden else "none")
+
+
+def row_ports(i):
+    if "listeningPorts" not in i:
+        return NOT_COLLECTED
+    seen = {}
+    for p in i.get("listeningPorts") or []:
+        port, proc = p.get("port"), p.get("process") or "?"
+        if port in WINDOWS_PORTS or (port and port >= 49152 and proc in CORE_PROCS):
+            continue
+        seen.setdefault(port, proc)
+    return ", ".join(f"{port} ({proc})" for port, proc in sorted(seen.items())) or "Windows defaults only"
+
+
+def row_startup(i):
+    st = i.get("startup")
+    if st is None:
+        return NOT_COLLECTED
+    run = st.get("runKeys") or []
+    folders = st.get("startupFolders") or []
+    tasks = st.get("scheduledTasks") or []
+    machine = [r.get("name") for r in run if r.get("scope") == "machine"]
+    users = len(run) - len(machine)
+    s = f"Run keys: {', '.join(machine) or 'none'}" + (f" (+{users} in signed-in users' keys)" if users else "")
+    if folders:
+        s += "<br>Startup folders: " + ", ".join(f"{f.get('name')}" + ("" if f.get("scope") == "machine" else f" ({f.get('scope')})") for f in folders)
+    # Per-user updater tasks (OneDrive, Google, Edge) repeat per profile; count them instead of listing.
+    noisy = re.compile(r"^(OneDrive |GoogleUpdater|MicrosoftEdgeUpdate|RunPlatformExperienceHelper|PostponeDeviceSetupToast)", re.I)
+    named = [t.get("name") for t in tasks if not noisy.search(t.get("name") or "")]
+    s += f"<br>Scheduled tasks ({len(tasks)} non-Microsoft): " + (", ".join(named) or "only updaters")
+    return s
+
+
+def row_wifi(i):
+    if "wifiProfiles" not in i:
+        return NOT_COLLECTED
+    return ", ".join(f"`{w}`" for w in i.get("wifiProfiles") or []) or "none"
+
+
 def row_errors(i):
     errs = i.get("errors") or []
     return "<br>".join(esc(e) for e in errs) if errs else "none"
@@ -281,7 +354,8 @@ def main():
         ("Disk", row_disk), ("Windows", row_windows), ("Directory join", row_join),
         ("Network", row_network), ("NIC / power saving", row_nic_power), ("BitLocker", row_bitlocker),
         ("Windows Update", row_updates), ("AV / firewall", row_av), ("Backup agent", row_backup),
-        ("Remote access", row_remote), ("Profiles", row_profiles), ("Local users", row_users),
+        ("Remote access", row_remote), ("Listening ports", row_ports), ("Shares", row_shares),
+        ("Printers", row_printers), ("Wi-Fi profiles", row_wifi), ("Startup", row_startup), ("Profiles", row_profiles), ("Local users", row_users),
         ("Local Administrators", row_admins), ("Applications", make_row_apps(note)),
         ("Collector errors", row_errors),
     ]

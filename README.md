@@ -10,7 +10,7 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 |---|---|
 | `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11), plus companion data files (`<script>.*.json`, e.g. `install-apps.catalog.json`) |
 | `bin/win-run` | Mac/Linux runner: upload a script (+ optional config) over SSH, run it, return its exit code, clean up |
-| `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists) |
+| `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists). Shares flag a **whole drive** shared; listening ports leave out Windows' own (RPC, SMB, NetBIOS, dynamic RPC); files from before a field existed show "not collected" |
 | `usb/` | The flash-drive kit launcher (`discovery.cmd`) for a first visit, before a machine has SSH; see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
 | `config/example.json` | Every config key any script understands, with placeholder values |
 | `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`); companion JSON files ASCII-only + valid JSON |
