@@ -33,6 +33,13 @@
       "Signer": "Zoom Communications, Inc.",
       "MsiArgs": "ZoomAutoUpdate=\"true\" ZConfig=\"AU2_EnableAutoUpdate=true\"",
       "Match": "Zoom Workplace*"
+    },
+    "tailscale": {
+      "Name": "Tailscale",
+      "Url": "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi",
+      "Signer": "Tailscale Inc.",
+      "MsiArgs": "TS_NOLAUNCH=\"true\" TS_INSTALLUPDATES=\"always\"",
+      "Match": "Tailscale"
     }
   }
 }

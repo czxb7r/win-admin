@@ -20,5 +20,10 @@
     "firefox"
   ],
   "HealthDays": 90,
-  "SmartctlPath": "C:\\tools\\smartctl.exe"
+  "SmartctlPath": "C:\\tools\\smartctl.exe",
+  "TailnetTags": [
+    "tag:workstation"
+  ],
+  "TailnetAcceptRoutes": false,
+  "TailnetAcceptDns": false
 }
