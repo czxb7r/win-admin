@@ -24,8 +24,11 @@ if exist "%KIT%client.json" (
 )
 echo.
 echo Set up OpenSSH admin access on %COMPUTERNAME%.
-echo SSH will be allowed only from the address(es) given here: the operator's
-echo machine, or the site's subnet router (comma-separated for more than one).
+echo SSH will be allowed only from what you give here: the operator's machine
+echo or the site's subnet router (addresses, comma-separated), or
+echo   LocalSubnet  this machine's own network, wherever it is (a first setup)
+echo   Any          every source
+echo Login is by the operator's SSH key only, whatever you choose.
 :ask
 set "ALLOW="
 if defined DEF (

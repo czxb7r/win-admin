@@ -29,7 +29,9 @@
       8. sshd_config: a managed block turns off password logins and allows
          only -AdminUser from -AllowFrom (AllowUsers user@addr). This holds
          even when a third-party firewall (e.g. Norton) replaces Windows
-         Firewall and ignores the rule from step 7. Validated with sshd -t
+         Firewall and ignores the rule from step 7. With LocalSubnet or Any
+         in -AllowFrom, AllowUsers names -AdminUser without an address
+         (sshd can't follow a subnet), and only the firewall limits sources. Validated with sshd -t
          (rolled back if invalid); sshd is restarted only if the file changed.
       9. Verify: service, listener, rule; prints the host key fingerprint to
          compare on the operator's first connect.
@@ -48,6 +50,16 @@
     Source addresses/subnets allowed to reach port 22 (array or comma-separated).
     REQUIRED -- from the command line or the config file. Behind a SNATing
     subnet router (e.g. Tailscale), this is the router's LAN address.
+    Two keywords instead of (or alongside) addresses, for a first setup
+    before the final source address is known:
+      LocalSubnet  whatever subnet(s) the machine is on at the time
+                   (Windows Firewall keyword; follows the machine when it
+                   moves, e.g. from a bench to the site).
+      Any          every source.
+    With either, sshd's AllowUsers names -AdminUser without an address, so
+    only Windows Firewall limits the source; keys-only login still applies.
+    Tighten later by re-running with the final address (over SSH from that
+    address is fine).
 
 .PARAMETER PublicKeys
     SSH public keys to authorize (array or comma-separated). Defaults to the
@@ -106,7 +118,11 @@ if ($Config) {
         if (-not $PSBoundParameters.ContainsKey($k) -and $null -ne $cfg.$k) { Set-Variable -Name $k -Value $cfg.$k }
     }
 }
-$AllowFrom  = @($AllowFrom  | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$AllowFrom  = @($AllowFrom  | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object {
+    if ($_ -eq 'any') { 'Any' } elseif ($_ -eq 'localsubnet') { 'LocalSubnet' } else { $_ } })
+# Any covers everything else; the firewall rejects Any mixed with addresses.
+if ($AllowFrom -contains 'Any') { $AllowFrom = @('Any') }
+$AllowKeyword = [bool]($AllowFrom | Where-Object { $_ -in 'Any', 'LocalSubnet' })
 $PublicKeys = @($PublicKeys | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($env:SSH_CLIENT) { $NoPause = $true }
 
@@ -244,6 +260,9 @@ if (-not $rule) {
     Set-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -Enabled True -Profile Any -RemoteAddress $AllowFrom
     Ok "Updated stock rule: all profiles, RemoteAddress $($AllowFrom -join ',')"
 }
+if ($AllowKeyword) {
+    Warn "Port 22 is open to $($AllowFrom -join ','), not a fixed address. Fine for a first setup; re-run with the final address (e.g. the site's subnet router) to tighten it."
+}
 
 # ---- 8. sshd_config ------------------------------------------------------
 Step "sshd_config (keys only; $AdminUser from $($AllowFrom -join ','))"
@@ -251,7 +270,8 @@ $sc = "$env:ProgramData\ssh\sshd_config"
 $begin = '# BEGIN enable-ssh-admin (managed; re-run the script to change)'
 $end   = '# END enable-ssh-admin'
 # Windows sshd matches user names in lowercase.
-$allow = ($AllowFrom | ForEach-Object { "$($AdminUser.ToLower())@$_" }) -join ' '
+# With LocalSubnet/Any, no address in AllowUsers: the firewall does the scoping.
+$allow = if ($AllowKeyword) { $AdminUser.ToLower() } else { ($AllowFrom | ForEach-Object { "$($AdminUser.ToLower())@$_" }) -join ' ' }
 # ChallengeResponseAuthentication (not its 8.7+ name KbdInteractiveAuthentication)
 # so older Windows 10 OpenSSH builds accept it too.
 $block = @($begin, 'PasswordAuthentication no', 'ChallengeResponseAuthentication no', "AllowUsers $allow", $end)
