@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# win-usb-kit -- build the discovery flash drive (usb/discovery.cmd + collectors) on macOS.
+# win-usb-kit -- build the USB kit (discovery.cmd + collectors, enable-ssh.cmd) on macOS.
 set -euo pipefail
 
 WIN_ADMIN="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CACHE="${XDG_CACHE_HOME:-$HOME/Library/Caches}/win-admin/smartmontools"
-KIT_FILES=(usb/discovery.cmd scripts/get-inventory.ps1 scripts/get-health.ps1 scripts/get-app-usage.ps1)
+CMDS=(discovery enable-ssh)                                          # usb/<name>.cmd
+PS1S=(get-inventory get-health get-app-usage enable-ssh-admin)       # scripts/<name>.ps1
+KIT_FILES=(); for f in "${CMDS[@]}"; do KIT_FILES+=("usb/$f.cmd"); done; for f in "${PS1S[@]}"; do KIT_FILES+=("scripts/$f.ps1"); done
 SMT_REPO="${WIN_USB_KIT_SMT_REPO:-smartmontools/smartmontools}"   # override only for testing the fallback
 # smartmontools release signing keys, full fingerprints, as published on
 # https://www.smartmontools.org/wiki/Download ("Release files are signed with ...").
@@ -18,11 +20,12 @@ usage() {
     cat <<'EOF'
 Usage: win-usb-kit [options]
 
-Builds the discovery flash drive: copies usb/discovery.cmd and the collectors
-(get-inventory, get-health, get-app-usage) from the latest win-admin release
-tag onto the drive, adds tools/smartctl.exe (latest smartmontools, signature
-verified), writes KIT-VERSION.txt, and ejects the drive. An existing output/
-folder on the drive (collected data) is never touched.
+Builds the USB kit: copies usb/discovery.cmd and the collectors
+(get-inventory, get-health, get-app-usage), and usb/enable-ssh.cmd with
+enable-ssh-admin.ps1, from the latest win-admin release tag onto the drive,
+adds tools/smartctl.exe (latest smartmontools, signature verified), writes
+KIT-VERSION.txt, and ejects the drive. An existing output/ folder on the drive
+(collected data, SSH setup logs) is never touched.
 
 Run it, plug in the drive when asked, pick it from the list. That's all.
 
@@ -31,6 +34,9 @@ Options:
   --tag TAG         win-admin release tag to copy (default: newest v* tag after git fetch).
   --smartctl FILE   Use this smartctl.exe or smartmontools-*.win32-setup.exe instead of downloading.
   --no-smartctl     Build the kit without smartctl.exe.
+  --config FILE     Copy this client config (JSON: AdminUser, AllowFrom,
+                    PublicKeys) to the drive as client.json, for enable-ssh.cmd.
+                    Without it, a client.json already on the drive is kept.
   --no-eject        Leave the drive mounted at the end.
   -h, --help        This help.
 
@@ -45,13 +51,14 @@ ok()   { printf '  \033[32mOK\033[0m   %s\n' "$*"; }
 warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
 die()  { printf '\033[31mwin-usb-kit: %s\033[0m\n' "$*" >&2; exit 1; }
 
-VOLUME="" TAG="" SMARTCTL_ARG="" NO_SMART=0 NO_EJECT=0
+VOLUME="" TAG="" SMARTCTL_ARG="" NO_SMART=0 NO_EJECT=0 CONFIG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --volume) VOLUME="${2:?}"; shift 2 ;;
         --tag) TAG="${2:?}"; shift 2 ;;
         --smartctl) SMARTCTL_ARG="${2:?}"; shift 2 ;;
         --no-smartctl) NO_SMART=1; shift ;;
+        --config) CONFIG="${2:?}"; shift 2 ;;
         --no-eject) NO_EJECT=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
@@ -59,6 +66,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(uname)" == Darwin ]] || die "macOS only (uses diskutil)."
+if [[ -n "$CONFIG" ]]; then
+    [[ -f "$CONFIG" ]] || die "no such config file: $CONFIG"
+    plutil -lint -s "$CONFIG" >/dev/null 2>&1 || die "not valid JSON: $CONFIG"
+fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 pl() { plutil -extract "$2" raw -o - - <<<"$1" 2>/dev/null || true; }   # pl <plist> <key>
@@ -144,9 +155,11 @@ git fetch -q --tags origin 2>/dev/null || warn "git fetch failed; using the tags
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "no tag $TAG."
 mkdir -p "$TMP/kit"
 git archive "$TAG" "${KIT_FILES[@]}" | tar -x -C "$TMP/kit" || die "$TAG doesn't have all of: ${KIT_FILES[*]}"
-CMD="$TMP/kit/usb/discovery.cmd"
 # cmd.exe wants CRLF; git archive normally applies .gitattributes, but make sure.
-if ! LC_ALL=C grep -q $'\r$' "$CMD"; then perl -pi -e 's/\r?\n/\r\n/' "$CMD"; fi
+for f in "${CMDS[@]}"; do
+    c="$TMP/kit/usb/$f.cmd"
+    if ! LC_ALL=C grep -q $'\r$' "$c"; then perl -pi -e 's/\r?\n/\r\n/' "$c"; fi
+done
 ok "kit: win-admin $TAG ($(git rev-list -n1 --abbrev-commit "$TAG"))"
 
 # ---- 3. smartctl ------------------------------------------------------------
@@ -251,39 +264,49 @@ fi
 
 # ---- 4. write the drive -----------------------------------------------------
 say "Writing to $VOLUME ..."
-cp "$CMD" "$VOLUME/discovery.cmd"
-for f in get-inventory get-health get-app-usage; do cp "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+for f in "${CMDS[@]}"; do cp "$TMP/kit/usb/$f.cmd" "$VOLUME/$f.cmd"; done
+for f in "${PS1S[@]}"; do cp "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+if [[ -n "$CONFIG" ]]; then cp "$CONFIG" "$VOLUME/client.json"; CONFIG_NOTE="client.json from $CONFIG"
+elif [[ -f "$VOLUME/client.json" ]]; then CONFIG_NOTE="client.json kept from an earlier build"
+else CONFIG_NOTE="none (enable-ssh.cmd asks for the allowed address)"; fi
 if [[ -n "$SMARTCTL" ]]; then mkdir -p "$VOLUME/tools"; cp "$SMARTCTL" "$VOLUME/tools/smartctl.exe"
 elif [[ $KEEP_OLD -eq 0 ]]; then rm -f "$VOLUME/tools/smartctl.exe"; rmdir "$VOLUME/tools" 2>/dev/null || true; fi
 {
     printf 'win-admin discovery kit\r\n'
     printf 'win-admin: %s (%s)\r\n' "$TAG" "$(git rev-list -n1 "$TAG")"
     printf 'smartctl:  %s\r\n' "$SMART_NOTE"
+    printf 'config:    %s\r\n' "$CONFIG_NOTE"
     printf 'built:     %s on %s\r\n' "$(date '+%F %T %Z')" "$(scutil --get ComputerName 2>/dev/null || hostname)"
-    printf '\r\nOn each computer: right-click discovery.cmd, Run as administrator.\r\n'
-    printf 'Output goes to output\\<COMPUTER>_<time>\\ on this drive.\r\n'
+    printf '\r\nRight-click, Run as administrator:\r\n'
+    printf '  discovery.cmd   collect inventory, health, app usage (read-only);\r\n'
+    printf '                  output goes to output\\<COMPUTER>_<time>\\ on this drive.\r\n'
+    printf '  enable-ssh.cmd  set up OpenSSH admin access (changes the machine);\r\n'
+    printf '                  its log, with the host key fingerprint, goes to output\\ssh\\.\r\n'
 } > "$VOLUME/KIT-VERSION.txt"
 
 # Verify what landed on the drive.
 bad=0
 check() { [[ "$(shasum -a 256 < "$1")" == "$(shasum -a 256 < "$2")" ]] || { warn "mismatch: $2"; bad=1; }; }
-check "$CMD" "$VOLUME/discovery.cmd"
-for f in get-inventory get-health get-app-usage; do check "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+for f in "${CMDS[@]}"; do
+    check "$TMP/kit/usb/$f.cmd" "$VOLUME/$f.cmd"
+    LC_ALL=C grep -q $'\r$' "$VOLUME/$f.cmd" || { warn "$f.cmd lost its CRLF line endings"; bad=1; }
+done
+for f in "${PS1S[@]}"; do check "$TMP/kit/scripts/$f.ps1" "$VOLUME/$f.ps1"; done
+[[ -z "$CONFIG" ]] || check "$CONFIG" "$VOLUME/client.json"
 [[ -z "$SMARTCTL" ]] || check "$SMARTCTL" "$VOLUME/tools/smartctl.exe"
-LC_ALL=C grep -q $'\r$' "$VOLUME/discovery.cmd" || { warn "discovery.cmd lost its CRLF line endings"; bad=1; }
 [[ $bad -eq 0 ]] || die "the drive doesn't match the kit; not ejecting."
 dot_clean -m "$VOLUME" 2>/dev/null || true
 find "$VOLUME" -maxdepth 2 -name '._*' -delete 2>/dev/null || true
 sync
 ok "verified on the drive:"
-( cd "$VOLUME" && ls -l discovery.cmd get-*.ps1 KIT-VERSION.txt tools/smartctl.exe 2>/dev/null | awk '{ printf "         %8s  %s\n", $5, $NF }' ) || true
+( cd "$VOLUME" && ls -l ./*.cmd ./*.ps1 client.json KIT-VERSION.txt tools/smartctl.exe 2>/dev/null | awk '{ sub(/^\.\//, "", $NF); printf "         %8s  %s\n", $5, $NF }' ) || true
 [[ -d "$VOLUME/output" ]] && say "         output/ (left as it was: $(find "$VOLUME/output" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') collection(s))"
 
 # ---- 5. eject ---------------------------------------------------------------
 if [[ $NO_EJECT -eq 1 ]]; then
     say "Done. $VOLUME left mounted."
 elif diskutil eject "$VOLUME" >/dev/null 2>&1; then
-    say "Done. Drive ejected; it's ready. On each PC: right-click discovery.cmd, Run as administrator."
+    say "Done. Drive ejected; it's ready. On each PC: right-click discovery.cmd (or enable-ssh.cmd), Run as administrator."
 else
     warn "couldn't eject $VOLUME (something has it open). Eject it in Finder."
 fi

@@ -11,8 +11,8 @@ Nothing here is specific to one site or client. Per-client values (subnet router
 | `scripts/` | PowerShell scripts that run **on the Windows machine** (Windows PowerShell 5.1, Win10/11), plus companion data files (`<script>.*.json`, e.g. `install-apps.catalog.json`) |
 | `bin/win-run` | Mac/Linux runner: upload a script (+ optional config) over SSH, run it, return its exit code, clean up |
 | `bin/win-inventory-render` | Mac/Linux: render `get-inventory` JSON files as a Markdown table, one column per host (`-c client.json` for `AppsOfNote`, `--apps` for full app lists). Shares flag a **whole drive** shared; listening ports leave out Windows' own (RPC, SMB, NetBIOS, dynamic RPC); files from before a field existed show "not collected" |
-| `bin/win-usb-kit` | Mac: build the discovery flash drive (pick the drive from a list; it does the rest), see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
-| `usb/` | The flash-drive kit launcher (`discovery.cmd`) for a first visit, before a machine has SSH; see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
+| `bin/win-usb-kit` | Mac: build the USB kit (pick the drive from a list; it does the rest), see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
+| `usb/` | The USB kit's launchers, for a machine without SSH: `discovery.cmd` (collect) and `enable-ssh.cmd` (set up SSH); see [Discovery from a flash drive](#discovery-from-a-flash-drive) |
 | `config/example.json` | Every config key any script understands, with placeholder values |
 | `tools/check` | Pre-commit check: ASCII-only + PowerShell parse check (`pwsh`); companion JSON files ASCII-only + valid JSON |
 
@@ -59,6 +59,10 @@ powershell -ExecutionPolicy Bypass -File C:\tmp\enable-ssh-admin.ps1 -AllowFrom 
 ```
 
 `-ExecutionPolicy Bypass` gets past a restrictive machine policy for that one run. Click **Yes** at the UAC prompt.
+
+### At the machine, from the USB kit
+
+Right-click `enable-ssh.cmd` on the stick built by [`win-usb-kit`](#discovery-from-a-flash-drive), **Run as administrator**. It asks which address to allow SSH from (default: `AllowFrom` in the stick's `client.json`, Enter keeps it), runs `enable-ssh-admin.ps1` from the stick with the stick's `client.json` (`AdminUser`, `PublicKeys`), and writes the log, host key fingerprint included, to `output\ssh\` on the stick. Nothing to download, and no network needed beyond what the OpenSSH feature install itself needs (Windows Update or a feature-on-demand source).
 
 ### At the machine, no USB stick (download in one line)
 
@@ -133,7 +137,7 @@ A snapshot, not a record to diff: processes, memory and event counts change ever
 
 ## Discovery from a flash drive
 
-For a first visit, before a machine has SSH (and to leave nothing behind on it): one launcher runs `get-inventory`, `get-health` and `get-app-usage` from the stick and writes their JSON back to it. Read-only on the machine.
+For a first visit, before a machine has SSH (and to leave nothing behind on it): one launcher, `discovery.cmd`, runs `get-inventory`, `get-health` and `get-app-usage` from the stick and writes their JSON back to it. Read-only on the machine. A second launcher, `enable-ssh.cmd`, sets up SSH from the same stick (it changes the machine), see [At the machine, from the USB kit](#at-the-machine-from-the-usb-kit).
 
 Build the stick on the Mac with one command, then pick the drive when asked:
 
@@ -143,17 +147,18 @@ Build the stick on the Mac with one command, then pick the drive when asked:
 
 It:
 1. Lists external **FAT32/exFAT** drives only (backup disks and anything Windows can't read are listed as "not offered") and waits for one to be plugged in if there is none. `--volume /Volumes/<name>` picks one directly; for a drive that isn't FAT32/exFAT it offers to erase the whole drive as exFAT, after you type the volume's name.
-2. Copies `usb/discovery.cmd` and the three collectors from the **newest release tag** (`git fetch`, then `git archive`; `--tag` for another), with CRLF line endings for the launcher.
+2. Copies `usb/discovery.cmd` with the three collectors, and `usb/enable-ssh.cmd` with `enable-ssh-admin.ps1`, from the **newest release tag** (`git fetch`, then `git archive`; `--tag` for another), with CRLF line endings for the launchers. `--config ~/src/<client>-infra/windows/client.json` puts the client's config on the stick as `client.json` (for `enable-ssh.cmd`); without it, a `client.json` already on the stick is kept.
 3. Gets `tools/smartctl.exe`: the latest smartmontools Windows installer from its GitHub release, GPG signature checked against the fingerprints pinned in the script (`SMT_KEYS`, from smartmontools.org's Download page), 64-bit `smartctl.exe` extracted with 7-Zip, cached in `~/Library/Caches/win-admin/smartmontools/<version>/`. 7-Zip and GnuPG are installed with Homebrew if missing. If any of that fails (no network, a release signed with a new key, no Homebrew), it says why and asks you to drag in an installer or `smartctl.exe` you downloaded yourself (an `.asc` next to an installer is checked); Enter skips smartctl. `--smartctl FILE` supplies one up front, `--no-smartctl` builds without it.
-4. Writes everything to the root of the drive, plus `KIT-VERSION.txt` (release, commit, smartctl source, build date). An existing `output\` folder is never touched, so a stick with collected data can be rebuilt.
+4. Writes everything to the root of the drive, plus `KIT-VERSION.txt` (release, commit, smartctl and config source, build date). An existing `output\` folder is never touched, so a stick with collected data can be rebuilt.
 5. Checks every file on the drive against its source (SHA-256), removes macOS `._` files, and ejects.
 
 The resulting drive:
 
 ```
-discovery.cmd  get-inventory.ps1  get-health.ps1  get-app-usage.ps1  KIT-VERSION.txt
+discovery.cmd  get-inventory.ps1  get-health.ps1  get-app-usage.ps1
+enable-ssh.cmd  enable-ssh-admin.ps1  client.json (with --config)  KIT-VERSION.txt
 tools\smartctl.exe   (unless skipped)
-output\              (created by the first collection)
+output\              (collections; output\ssh\ holds enable-ssh logs)
 ```
 
 When a smartmontools release is signed with a new key, `win-usb-kit` names the key; check its fingerprint on smartmontools.org's Download page and add it to `SMT_KEYS`. smartmontools is GPL; the binary is never committed here.
@@ -162,7 +167,7 @@ On each machine: right-click `discovery.cmd`, **Run as administrator**, wait 1-3
 
 At home: render the inventory with `win-inventory-render` and commit it in the client repo like any SSH collection; read the health findings and app usage into the write-up.
 
-If the antivirus blocks a script ("This script contains malicious content and has been blocked by your antivirus software"): that is AMSI, which `-ExecutionPolicy Bypass` does not get around. Seen with Bitdefender on `enable-ssh-admin.ps1` (a heuristic, `CMD:Heur...`). Add an exception for that one file in the AV and run again; for smartctl.exe (raw disk access sometimes trips "riskware" heuristics), an exception for `tools\smartctl.exe`. If Group Policy enforces an execution policy (`Get-ExecutionPolicy -List` shows MachinePolicy/UserPolicy), `-ExecutionPolicy Bypass` is ignored; that needs a policy exception from whoever runs the GPO.
+If the antivirus blocks a script ("This script contains malicious content and has been blocked by your antivirus software"): that is AMSI, which `-ExecutionPolicy Bypass` does not get around. Seen with Bitdefender on `enable-ssh-admin.ps1` (a heuristic, `CMD:Heur...`). Add an exception for that one file in the AV (by its path on the stick: an exception for `C:\tmp\enable-ssh-admin.ps1` doesn't cover `D:\enable-ssh-admin.ps1`) and run again; for smartctl.exe (raw disk access sometimes trips "riskware" heuristics), an exception for `tools\smartctl.exe`. If Group Policy enforces an execution policy (`Get-ExecutionPolicy -List` shows MachinePolicy/UserPolicy), `-ExecutionPolicy Bypass` is ignored; that needs a policy exception from whoever runs the GPO.
 
 ## Client repos
 
