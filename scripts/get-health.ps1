@@ -250,16 +250,30 @@ $out.smart = Section 'smart' {
     $scanText = (Invoke-Native $smartctl --scan --json) -join "`n"
     $scan = $null
     try { $scan = $scanText | ConvertFrom-Json } catch { throw "smartctl --scan output not JSON (blocked by antivirus?): $($scanText.Substring(0, [math]::Min(200, $scanText.Length)))" }
+    # The USB drive the script runs from (the kit's stick) is not checked.
+    # smartctl's /dev/sdX is \\.\PhysicalDriveN with a=0, b=1, ...
+    $selfDev = $null
+    if ($PSScriptRoot -match '^([A-Za-z]):') {
+        $n = (Get-Partition -DriveLetter $Matches[1] -ErrorAction SilentlyContinue | Select-Object -First 1).DiskNumber
+        if ($null -ne $n -and $n -lt 26 -and (Get-Disk -Number $n -ErrorAction SilentlyContinue).BusType -eq 'USB') {
+            $selfDev = '/dev/sd' + [char](97 + $n)
+        }
+    }
+    $seen = @{}
     $devs = @(foreach ($dev in @($scan.devices)) {
+        if ($selfDev -and $dev.name -eq $selfDev) { continue }
         $a = @('-a', '-j', $dev.name); if ($dev.type) { $a += @('-d', $dev.type) }
         $txt = (Invoke-Native $smartctl @a) -join "`n"
         try {
             $j = $txt | ConvertFrom-Json
+            # A disk behind Intel RST is listed twice (/dev/sdX and /dev/csmiN,M).
+            $sn = S $j.serial_number
+            if ($sn) { if ($seen.ContainsKey($sn)) { continue }; $seen[$sn] = $true }
             [ordered]@{
                 device       = S $dev.name
                 model        = S $j.model_name
-                serial       = S $j.serial_number
-                passed       = $(if ($null -ne $j.smart_status) { [bool]$j.smart_status.passed })
+                serial       = $sn
+                passed       = $(if ($null -ne $j.smart_status) { [bool]$j.smart_status.passed } else { $null })
                 temperatureC = $j.temperature.current
                 powerOnHours = $j.power_on_time.hours
                 powerCycles  = $j.power_cycle_count
