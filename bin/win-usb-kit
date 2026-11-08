@@ -68,7 +68,9 @@ done
 [[ "$(uname)" == Darwin ]] || die "macOS only (uses diskutil)."
 if [[ -n "$CONFIG" ]]; then
     [[ -f "$CONFIG" ]] || die "no such config file: $CONFIG"
-    plutil -lint -s "$CONFIG" >/dev/null 2>&1 || die "not valid JSON: $CONFIG"
+    # JSON check with JavaScript for Automation (built into macOS; plutil reads plists, not JSON).
+    osascript -l JavaScript -e 'function run(a) { JSON.parse($.NSString.stringWithContentsOfFileEncodingError(a[0], 4, null).js); return "" }' \
+        "$CONFIG" >/dev/null 2>&1 || die "not valid JSON: $CONFIG"
 fi
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
@@ -300,7 +302,7 @@ find "$VOLUME" -maxdepth 2 -name '._*' -delete 2>/dev/null || true
 sync
 ok "verified on the drive:"
 ( cd "$VOLUME" && ls -l ./*.cmd ./*.ps1 client.json KIT-VERSION.txt tools/smartctl.exe 2>/dev/null | awk '{ sub(/^\.\//, "", $NF); printf "         %8s  %s\n", $5, $NF }' ) || true
-[[ -d "$VOLUME/output" ]] && say "         output/ (left as it was: $(find "$VOLUME/output" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') collection(s))"
+[[ -d "$VOLUME/output" ]] && say "         output/ (left as it was: $(find "$VOLUME/output" -mindepth 1 -maxdepth 1 -type d ! -name ssh | wc -l | tr -d ' ') collection(s))"
 
 # ---- 5. eject ---------------------------------------------------------------
 if [[ $NO_EJECT -eq 1 ]]; then
